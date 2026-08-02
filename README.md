@@ -285,6 +285,15 @@ Key material is redacted unless `--show-keys` is explicitly supplied.
   journalctl --user -u omarchy-watch-unlockd --no-pager -n 100
   ```
 
+## Inspiration
+
+- [KatelynHaworth/watch-unlock-rs](https://github.com/KatelynHaworth/watch-unlock-rs)
+  demonstrated a Rust PAM/CLI design using an IRK, RSSI, and Apple Continuity
+  Nearby Info to authenticate an Apple Watch.
+- [DavidSt49/watch-unlock-linux](https://github.com/DavidSt49/watch-unlock-linux)
+  provided a clear reference for BLE scanning, RPA resolution, Continuity state,
+  and proximity thresholds on Linux.
+
 ## Development
 
 ```sh
