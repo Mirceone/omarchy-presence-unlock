@@ -1,0 +1,16 @@
+[package]
+name = "pam_omarchy_watch_unlock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+nix = { workspace = true, features = ["user"] }
+omarchy-watch-unlock-protocol = { path = "../protocol", default-features = false }
+pam.workspace = true

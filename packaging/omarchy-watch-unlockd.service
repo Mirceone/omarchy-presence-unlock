@@ -1,0 +1,25 @@
+[Unit]
+Description=BLE device presence authorization for Omarchy
+After=bluetooth.target
+
+[Service]
+ExecStart=/usr/bin/omarchy-watch-unlockd
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RuntimeDirectory=omarchy-watch-unlock
+RuntimeDirectoryMode=0700
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=default.target

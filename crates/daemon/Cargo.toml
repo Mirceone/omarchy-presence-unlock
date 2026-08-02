@@ -1,0 +1,16 @@
+[package]
+name = "omarchy-watch-unlockd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bluer.workspace = true
+futures-util.workspace = true
+nix = { workspace = true, features = ["user", "signal"] }
+omarchy-watch-unlock-protocol = { path = "../protocol" }
+thiserror.workspace = true
+tokio.workspace = true
