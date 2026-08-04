@@ -17,7 +17,9 @@ use tokio::{
     process::{Child, ChildStdout, Command},
 };
 
-#[allow(clippy::duration_suboptimal_units)] // `from_mins` is newer than the 1.88 MSRV.
+// Clippy 1.88 predates this lint, while newer Clippy versions suggest `from_mins`,
+// which is newer than this project's MSRV.
+#[allow(unknown_lints, clippy::duration_suboptimal_units)]
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq)]
