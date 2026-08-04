@@ -148,8 +148,9 @@ enum Commands {
     Confirm,
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
-    /// Guided first-run setup: enroll a device, choose an unlock backend, and
-    /// wire the lock screen. Also runs when no subcommand is given, in a
+    /// Interactive menu: enroll a device, manage enrolled devices, choose the
+    /// unlock backend, set quorum, wire the lock screen, run diagnostics, and
+    /// watch live status. Also runs when no subcommand is given, in a
     /// terminal.
     Init,
 }

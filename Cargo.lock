@@ -875,6 +875,7 @@ dependencies = [
  "bluer",
  "btmgmt",
  "clap",
+ "console",
  "dialoguer",
  "futures-util",
  "omarchy-watch-unlock-protocol",
