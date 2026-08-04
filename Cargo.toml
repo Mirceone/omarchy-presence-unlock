@@ -22,7 +22,7 @@ bluer = { version = "0.17", features = ["bluetoothd"] }
 clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 nix = { version = "0.29", features = ["time"] }
-pam = { version = "0.8", features = ["module"] }
+pam = { version = "0.8", default-features = false, features = ["module"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

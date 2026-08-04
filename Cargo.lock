@@ -902,7 +902,6 @@ dependencies = [
  "memchr",
  "pam-macros",
  "pam-sys",
- "users",
 ]
 
 [[package]]
@@ -1361,16 +1360,6 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[package]]
-name = "users"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa4227e95324a443c9fcb06e03d4d85e91aabe9a5a02aa818688b6918b6af486"
-dependencies = [
- "libc",
- "log",
-]
 
 [[package]]
 name = "utf8parse"
