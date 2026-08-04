@@ -77,7 +77,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit locked dependencies
-        run: cargo audit --locked
+        run: cargo audit
 
   arch-package:
     name: Arch package metadata
