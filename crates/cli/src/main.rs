@@ -5,17 +5,19 @@ mod doctor;
 mod enrollment;
 mod pairing;
 mod setup;
+mod wizard;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use devices::{Criteria, Overrides};
 use omarchy_watch_unlock_protocol::wire;
+use std::io::IsTerminal;
 use std::time::Duration;
 
 #[derive(Parser)]
 #[command(about = "BLE proximity unlock for Omarchy")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +148,10 @@ enum Commands {
     Confirm,
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
+    /// Guided first-run setup: enroll a device, choose an unlock backend, and
+    /// wire the lock screen. Also runs when no subcommand is given, in a
+    /// terminal.
+    Init,
 }
 
 fn enroll(id: &str) -> Result<(), String> {
@@ -190,9 +196,16 @@ fn confirm() -> Result<(), String> {
 }
 
 fn main() {
-    let result = match Cli::parse().command {
-        Commands::Enroll { id } => enroll(&id),
-        Commands::AddDevice {
+    let Cli { command } = Cli::parse();
+    let result = match command {
+        None if std::io::stdin().is_terminal() => wizard::run(),
+        None => {
+            let _ = Cli::command().print_help();
+            println!();
+            Ok(())
+        }
+        Some(Commands::Enroll { id }) => enroll(&id),
+        Some(Commands::AddDevice {
             id,
             profile,
             address,
@@ -202,7 +215,7 @@ fn main() {
             threshold_dbm,
             minimum_samples,
             freshness_ms,
-        } => devices::add(
+        }) => devices::add(
             &id,
             &profile,
             &Criteria {
@@ -217,30 +230,30 @@ fn main() {
                 freshness_ms,
             },
         ),
-        Commands::RemoveDevice { id } => devices::remove(&id),
-        Commands::Quorum { expression } => devices::set_quorum(&expression),
-        Commands::Backend {
+        Some(Commands::RemoveDevice { id }) => devices::remove(&id),
+        Some(Commands::Quorum { expression }) => devices::set_quorum(&expression),
+        Some(Commands::Backend {
             name,
             process,
             signal,
             command,
-        } => devices::set_backend(&name, process.as_deref(), signal.as_deref(), &command),
-        Commands::Devices { adapter, scan_secs } => {
+        }) => devices::set_backend(&name, process.as_deref(), signal.as_deref(), &command),
+        Some(Commands::Devices { adapter, scan_secs }) => {
             pairing::list_advertising(adapter.as_deref(), scan_secs)
         }
-        Commands::Pair {
+        Some(Commands::Pair {
             adapter,
             scan_secs,
             id,
             save,
-        } => pairing::pair(adapter.as_deref(), scan_secs, &id, save),
-        Commands::EnrollDevice {
+        }) => pairing::pair(adapter.as_deref(), scan_secs, &id, save),
+        Some(Commands::EnrollDevice {
             provider,
             adapter,
             timeout_secs,
             id,
             save,
-        } => enrollment::enroll(
+        }) => enrollment::enroll(
             &provider,
             &enrollment::Request {
                 adapter: adapter.as_deref(),
@@ -249,18 +262,19 @@ fn main() {
                 save,
             },
         ),
-        Commands::Profiles => {
+        Some(Commands::Profiles) => {
             enrollment::print_catalog();
             Ok(())
         }
-        Commands::BondInfo { adapter, show_keys } => {
+        Some(Commands::BondInfo { adapter, show_keys }) => {
             pairing::bond_info(adapter.as_deref(), show_keys)
         }
-        Commands::MgmtMonitor { adapter_index } => enrollment::run_mgmt_helper(adapter_index),
-        Commands::Doctor => doctor::doctor(),
-        Commands::Status => status(),
-        Commands::Confirm => confirm(),
-        Commands::SetupOmarchy => setup::setup_omarchy(),
+        Some(Commands::MgmtMonitor { adapter_index }) => enrollment::run_mgmt_helper(adapter_index),
+        Some(Commands::Doctor) => doctor::doctor(),
+        Some(Commands::Status) => status(),
+        Some(Commands::Confirm) => confirm(),
+        Some(Commands::SetupOmarchy) => setup::setup_omarchy(),
+        Some(Commands::Init) => wizard::run(),
     };
     if let Err(error) = result {
         eprintln!("error: {error}");

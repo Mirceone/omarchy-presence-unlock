@@ -60,7 +60,19 @@ module, and service assets under `/usr`, then enables the systemd user service.
 It does not modify enrollment, Hyprland, or PAM configuration. It is safe to
 rerun after source changes.
 
-## Apple Watch quick start
+## Guided setup
+
+```sh
+omarchy-watch-unlock init
+```
+
+Run this in a terminal (bare `omarchy-watch-unlock`, with no arguments, does
+the same when it detects one) for a prompted walk through enrollment, backend
+selection, and lock-screen integration — the same steps as the manual quick
+start below, without needing to remember the command order. Re-running it is
+safe: it does not undo an already-enrolled device or a chosen backend.
+
+## Apple Watch manual quick start
 
 Stop the daemon's continuous scan while the PC temporarily advertises as a
 Heart Rate Sensor:
