@@ -14,6 +14,8 @@ pub struct Request<'a> {
     pub timeout_secs: u64,
     pub id: &'a str,
     pub save: bool,
+    /// Set to ask a long-running enrollment to stop early and clean up.
+    pub cancel: &'a std::sync::atomic::AtomicBool,
 }
 
 pub struct Provider {

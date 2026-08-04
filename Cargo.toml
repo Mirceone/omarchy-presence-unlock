@@ -23,7 +23,7 @@ clap = { version = "4.5", features = ["derive"] }
 console = "0.16"
 dialoguer = { version = "0.12", default-features = false }
 futures-util = "0.3"
-nix = { version = "0.29", features = ["time"] }
+nix = { version = "0.29", features = ["poll", "term", "time"] }
 pam = { version = "0.8", default-features = false, features = ["module"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }

@@ -3,6 +3,7 @@ mod client;
 mod devices;
 mod doctor;
 mod enrollment;
+mod keys;
 mod pairing;
 mod setup;
 mod wizard;
@@ -254,15 +255,21 @@ fn main() {
             timeout_secs,
             id,
             save,
-        }) => enrollment::enroll(
-            &provider,
-            &enrollment::Request {
-                adapter: adapter.as_deref(),
-                timeout_secs,
-                id: &id,
-                save,
-            },
-        ),
+        }) => {
+            // The non-interactive CLI has no key reader to request a cancel;
+            // Ctrl+C ends the process instead.
+            let never = std::sync::atomic::AtomicBool::new(false);
+            enrollment::enroll(
+                &provider,
+                &enrollment::Request {
+                    adapter: adapter.as_deref(),
+                    timeout_secs,
+                    id: &id,
+                    save,
+                    cancel: &never,
+                },
+            )
+        }
         Some(Commands::Profiles) => {
             enrollment::print_catalog();
             Ok(())

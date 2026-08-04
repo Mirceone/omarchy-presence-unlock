@@ -14,5 +14,6 @@ fn enroll(request: &Request<'_>) -> Result<(), String> {
         request.timeout_secs,
         request.id,
         request.save,
+        request.cancel,
     )
 }

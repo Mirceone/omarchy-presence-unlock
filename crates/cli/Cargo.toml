@@ -15,6 +15,7 @@ dialoguer.workspace = true
 futures-util.workspace = true
 bluer.workspace = true
 clap.workspace = true
+nix.workspace = true
 omarchy-watch-unlock-protocol = { path = "../protocol" }
 rpassword.workspace = true
 tokio.workspace = true

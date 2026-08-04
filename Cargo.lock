@@ -878,6 +878,7 @@ dependencies = [
  "console",
  "dialoguer",
  "futures-util",
+ "nix",
  "omarchy-watch-unlock-protocol",
  "rpassword",
  "tokio",
