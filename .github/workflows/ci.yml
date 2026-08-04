@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -42,7 +42,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libpam0g-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install --yes libclang-dev libdbus-1-dev libpam0g-dev llvm-dev pkg-config
 
       - name: Verify formatting
         run: cargo fmt --all -- --check
@@ -63,7 +63,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -90,7 +90,7 @@ jobs:
         run: pacman --sync --refresh --sysupgrade --noconfirm --needed base-devel git pacman-contrib shellcheck
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
