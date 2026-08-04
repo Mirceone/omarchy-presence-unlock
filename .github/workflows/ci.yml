@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - ci-cd-integration
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust quality and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ vars.RUST_VERSION || '1.88.0' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ vars.RUST_VERSION || '1.88.0' }}
+          components: rustfmt, clippy
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libdbus-1-dev libpam0g-dev pkg-config
+
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --all-features --locked
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+
+  security:
+    name: Dependency security audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit locked dependencies
+        run: cargo audit --locked
+
+  arch-package:
+    name: Arch package metadata
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install packaging tools
+        run: pacman --sync --refresh --sysupgrade --noconfirm --needed base-devel git pacman-contrib shellcheck
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate installer shell syntax
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
+
+      - name: Validate Arch package metadata
+        run: |
+          useradd --create-home --shell /bin/bash builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder --command 'cd "$GITHUB_WORKSPACE" && makepkg --printsrcinfo > .SRCINFO'
+          test -s .SRCINFO
+          grep --fixed-strings 'pkgname = omarchy-watch-unlock' .SRCINFO
+          grep --fixed-strings 'depends = bluez' .SRCINFO
+          grep --fixed-strings 'depends = pam' .SRCINFO
