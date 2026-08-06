@@ -29,10 +29,12 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     process::Command,
-    time::Duration,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::{Duration, Instant},
 };
 
 use crate::devices::{self, Criteria, Overrides};
+use crate::enrollment::{Cleanup, Phase, Progress, Sink};
 
 /// How long a bond attempt may take before the `pair()` future is dropped,
 /// which is what issues `CancelPairing` — there is no cancel method.
@@ -46,8 +48,27 @@ pub struct Candidate {
     pub paired: bool,
 }
 
+/// Deliberately not `Runtime::new()`: that enables every driver, including
+/// the signal driver. A second signal driver registers the same global
+/// self-pipe with a second reactor, and both then broadcast the same SIGINT
+/// — turning one Ctrl+C into two notifications for whoever is listening.
+/// `BlueZ` work needs IO and timers, never signals.
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Runtime::new().map_err(|error| error.to_string())
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+/// `pair` is a CLI-only entry point, so the wizard's SIGINT handler is never
+/// installed alongside it and this runtime can own signals — unlike
+/// [`runtime`], which is shared with the menu and must not.
+fn signal_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 async fn open_adapter(session: &Session, name: Option<&str>) -> Result<Adapter, String> {
@@ -71,6 +92,18 @@ async fn open_adapter(session: &Session, name: Option<&str>) -> Result<Adapter, 
     Ok(adapter)
 }
 
+/// Completes once `cancel` is set. Polled rather than awaited on
+/// `signal::ctrl_c()` because this runtime deliberately has no signal driver.
+async fn cancelled(cancel: &AtomicBool) {
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        ticker.tick().await;
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+    }
+}
+
 /// Runs one LE discovery session and returns everything that actually
 /// advertised, strongest first.
 ///
@@ -78,7 +111,15 @@ async fn open_adapter(session: &Session, name: Option<&str>) -> Result<Adapter, 
 /// `DeviceAdded` before any radio traffic arrives, and re-emits it on every
 /// property change. Keeping only devices with a live RSSI is precisely the
 /// cached-versus-present distinction; deduping by address handles the re-emits.
-async fn scan(adapter: &Adapter, window: Duration) -> Result<Vec<Candidate>, String> {
+///
+/// `found` tracks the running total, so a caller drawing a scan screen can
+/// show it climbing rather than only the number the window ended on.
+async fn scan(
+    adapter: &Adapter,
+    window: Duration,
+    cancel: &AtomicBool,
+    found: &AtomicUsize,
+) -> Result<Vec<Candidate>, String> {
     // Must precede discover_devices*, or BlueZ answers DiscoveryActive.
     adapter
         .set_discovery_filter(DiscoveryFilter {
@@ -88,43 +129,75 @@ async fn scan(adapter: &Adapter, window: Duration) -> Result<Vec<Candidate>, Str
         })
         .await
         .map_err(|error| error.to_string())?;
-    let mut events = adapter
-        .discover_devices_with_changes()
-        .await
-        .map_err(|error| error.to_string())?;
+
+    let deadline = Instant::now() + window;
     let mut seen: HashMap<Address, Candidate> = HashMap::new();
-    // Elapsing is the normal exit; the stream itself never ends.
-    let _ = tokio::time::timeout(window, async {
-        while let Some(event) = events.next().await {
-            match event {
-                AdapterEvent::DeviceAdded(address) => {
-                    let Ok(device) = adapter.device(address) else {
-                        continue;
-                    };
-                    let Ok(Some(rssi)) = device.rssi().await else {
-                        continue;
-                    };
-                    seen.insert(
-                        address,
-                        Candidate {
-                            address,
-                            alias: device.alias().await.ok(),
-                            rssi,
-                            paired: device.is_paired().await.unwrap_or(false),
-                        },
-                    );
+    // BlueZ can end our discovery session as soon as it starts — reliably so
+    // in the moments after another client's session is torn down, which is
+    // exactly when the menu scans, having just stopped the daemon. The stream
+    // replays the device cache before it dies, so a single attempt looks like
+    // a successful scan while reporting nothing the radio actually heard.
+    // Restarting until the window is spent is what keeps this a real scan.
+    while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
+        let mut events = adapter
+            .discover_devices_with_changes()
+            .await
+            .map_err(|error| error.to_string())?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // Inner value is true when the session died and is worth restarting.
+        let outcome = tokio::time::timeout(remaining, async {
+            // The ticker is what makes `cancel` responsive: without it a quiet
+            // radio would park the loop on `next()` until the window ran out.
+            let mut ticker = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    event = events.next() => {
+                        let Some(event) = event else { return true };
+                        match event {
+                            AdapterEvent::DeviceAdded(address) => {
+                                let Ok(device) = adapter.device(address) else {
+                                    continue;
+                                };
+                                let Ok(Some(rssi)) = device.rssi().await else {
+                                    continue;
+                                };
+                                seen.insert(
+                                    address,
+                                    Candidate {
+                                        address,
+                                        alias: device.alias().await.ok(),
+                                        rssi,
+                                        paired: device.is_paired().await.unwrap_or(false),
+                                    },
+                                );
+                                found.store(seen.len(), Ordering::Relaxed);
+                            }
+                            AdapterEvent::DeviceRemoved(address) => {
+                                seen.remove(&address);
+                                found.store(seen.len(), Ordering::Relaxed);
+                            }
+                            AdapterEvent::PropertyChanged(_) => {}
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if cancel.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                    }
                 }
-                AdapterEvent::DeviceRemoved(address) => {
-                    seen.remove(&address);
-                }
-                AdapterEvent::PropertyChanged(_) => {}
             }
+        })
+        .await;
+        // Dropping the stream ends the discovery session; the controller must
+        // be free before a connection can be established.
+        drop(events);
+        // Elapsed window or a cancel both mean stop; only a dead session retries.
+        if outcome != Ok(true) {
+            break;
         }
-    })
-    .await;
-    // Dropping the stream ends the discovery session; the controller must be
-    // free before a connection can be established.
-    drop(events);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
     let mut candidates: Vec<Candidate> = seen.into_values().collect();
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.rssi));
     Ok(candidates)
@@ -150,6 +223,47 @@ fn print_candidates(candidates: &[Candidate]) {
 const NOTHING_FOUND: &str =
     "no advertising devices found; bring the device close and make sure it is awake";
 
+/// Scans and returns everything currently advertising, strongest first.
+///
+/// Exposed as data rather than printed text so the interactive menu can offer
+/// the results as a picker instead of asking for an address to be typed in.
+/// An empty result is a fact about the room, not an error; only a caller with
+/// nothing to show for it renders that as one.
+///
+/// Setting `cancel` ends the window early and returns whatever has been seen
+/// so far, so a caller can cut a long wait short without losing the results.
+/// `found` counts what has been seen while the window is still open.
+///
+/// # Errors
+///
+/// Returns an error when `BlueZ` is unreachable or the adapter is unusable.
+pub fn discover(
+    adapter_name: Option<&str>,
+    scan_secs: u64,
+    cancel: &AtomicBool,
+    found: &AtomicUsize,
+) -> Result<Vec<Candidate>, String> {
+    runtime()?.block_on(async move {
+        let session = Session::new().await.map_err(|error| error.to_string())?;
+        let adapter = open_adapter(&session, adapter_name).await?;
+        scan(&adapter, Duration::from_secs(scan_secs), cancel, found).await
+    })
+}
+
+/// The name this computer advertises under, which is the name a user has to
+/// recognise on the device they are pairing from.
+///
+/// # Errors
+///
+/// Returns an error when `BlueZ` is unreachable or the adapter is unusable.
+pub fn adapter_alias(adapter_name: Option<&str>) -> Result<String, String> {
+    runtime()?.block_on(async move {
+        let session = Session::new().await.map_err(|error| error.to_string())?;
+        let adapter = open_adapter(&session, adapter_name).await?;
+        adapter.alias().await.map_err(|error| error.to_string())
+    })
+}
+
 /// Scans and prints everything currently advertising.
 ///
 /// # Errors
@@ -157,17 +271,18 @@ const NOTHING_FOUND: &str =
 /// Returns an error when `BlueZ` is unreachable, the adapter is unusable, or
 /// nothing advertised during the window.
 pub fn list_advertising(adapter_name: Option<&str>, scan_secs: u64) -> Result<(), String> {
-    runtime()?.block_on(async move {
-        let session = Session::new().await.map_err(|error| error.to_string())?;
-        let adapter = open_adapter(&session, adapter_name).await?;
-        println!("Scanning for {scan_secs}s on {}...", adapter.name());
-        let candidates = scan(&adapter, Duration::from_secs(scan_secs)).await?;
-        if candidates.is_empty() {
-            return Err(NOTHING_FOUND.to_string());
-        }
-        print_candidates(&candidates);
-        Ok(())
-    })
+    let never = AtomicBool::new(false);
+    let found = AtomicUsize::new(0);
+    println!(
+        "Scanning for {scan_secs}s on {}...",
+        adapter_name.unwrap_or("the default adapter")
+    );
+    let candidates = discover(adapter_name, scan_secs, &never, &found)?;
+    if candidates.is_empty() {
+        return Err(NOTHING_FOUND.to_string());
+    }
+    print_candidates(&candidates);
+    Ok(())
 }
 
 /// Reads one line from the terminal without blocking the reactor.
@@ -301,21 +416,28 @@ async fn read_bond_record(path: &Path) -> Result<String, String> {
     ))
 }
 
+/// Whether a self-check could be performed at all.
+#[derive(Debug, PartialEq, Eq)]
+enum Checked {
+    /// The key resolved the address the device was advertising.
+    Resolved,
+    /// The device was using a fixed address, which no key resolves.
+    NotApplicable,
+}
+
 /// Confirms the extracted key really resolves the address the device was using.
 ///
 /// This is the one check that catches a byte-order regression against real
-/// hardware. Only a resolvable private address can be checked at all.
-fn self_check(irk_file_order: &[u8; 16], scanned: Address) -> Result<(), String> {
+/// hardware. Only a resolvable private address can be checked at all, and the
+/// caller decides whether that is worth saying out loud.
+fn self_check(irk_file_order: &[u8; 16], scanned: Address) -> Result<Checked, String> {
     if scanned.0[0] >> 6 != 0b01 {
-        println!(
-            "selected device was not using a resolvable private address; skipping resolution self-check"
-        );
-        return Ok(());
+        return Ok(Checked::NotApplicable);
     }
     let mut aes_key = *irk_file_order;
     aes_key.reverse();
     if IrkMatcher::new(&aes_key).matches(&scanned.0) {
-        Ok(())
+        Ok(Checked::Resolved)
     } else {
         Err(
             "the extracted key does not resolve the address this device was advertising; not saving"
@@ -339,7 +461,13 @@ async fn pair_flow(
         .map_err(|error| error.to_string())?;
 
     println!("Scanning for {scan_secs}s on {}...", adapter.name());
-    let candidates = scan(&adapter, Duration::from_secs(scan_secs)).await?;
+    let candidates = scan(
+        &adapter,
+        Duration::from_secs(scan_secs),
+        &AtomicBool::new(false),
+        &AtomicUsize::new(0),
+    )
+    .await?;
     if candidates.is_empty() {
         return Err(NOTHING_FOUND.to_string());
     }
@@ -415,7 +543,11 @@ async fn extract_and_report(
         }
         BluezIrkError::Malformed => error.to_string(),
     })?;
-    self_check(&irk, observed)?;
+    if self_check(&irk, observed)? == Checked::NotApplicable {
+        println!(
+            "selected device was not using a resolvable private address; skipping resolution self-check"
+        );
+    }
 
     if !save {
         println!("IRK obtained and verified for {identity}; re-run with --save to enroll it");
@@ -457,7 +589,7 @@ pub fn pair(
     id: &str,
     save: bool,
 ) -> Result<(), String> {
-    runtime()?.block_on(async move {
+    signal_runtime()?.block_on(async move {
         // Ctrl-C unwinds through the same Drop paths that stop discovery and
         // unregister the agent.
         tokio::select! {
@@ -570,26 +702,42 @@ fn capture_application() -> Application {
     }
 }
 
-async fn already_paired(adapter: &Adapter) -> Result<HashSet<Address>, String> {
-    let mut paired = HashSet::new();
+/// Every device `BlueZ` already had a live relationship with — connected,
+/// bonded, or both — when the capture flow started.
+///
+/// A bonded-only snapshot is too narrow for either caller. The cancellation
+/// cleanup disconnects and removes whatever is missing from this set, so an
+/// unrelated unpaired connection predating the flow — or one another
+/// application opens alongside it — would be torn down; and the connection
+/// wait claims the first connected peer missing from it, which that same
+/// unrelated connection would win.
+///
+/// Devices merely sitting in the discovery cache are deliberately absent: the
+/// peer being enrolled has very likely been seen before, and excluding it
+/// would leave the wait hanging until its timeout.
+async fn established_before(adapter: &Adapter) -> Result<HashSet<Address>, String> {
+    let mut established = HashSet::new();
     for address in adapter
         .device_addresses()
         .await
         .map_err(|error| error.to_string())?
     {
         if let Ok(device) = adapter.device(address)
-            && device.is_paired().await.unwrap_or(false)
+            && (device.is_connected().await.unwrap_or(false)
+                || device.is_paired().await.unwrap_or(false))
         {
-            paired.insert(address);
+            established.insert(address);
         }
     }
-    Ok(paired)
+    Ok(established)
 }
 
-/// Finds the first connected, unpaired peer; known bonded devices are ignored.
+/// Finds the first peer that connects *during* the flow and has not bonded
+/// yet. Anything already connected or bonded when the flow started is another
+/// application's, not the device being enrolled.
 async fn await_incoming_connection(
     adapter: &Adapter,
-    paired_before: &HashSet<Address>,
+    established: &HashSet<Address>,
 ) -> Result<(bluer::Device, Address), String> {
     loop {
         for address in adapter
@@ -597,7 +745,7 @@ async fn await_incoming_connection(
             .await
             .map_err(|error| error.to_string())?
         {
-            if paired_before.contains(&address) {
+            if established.contains(&address) {
                 continue;
             }
             let Ok(device) = adapter.device(address) else {
@@ -626,17 +774,16 @@ async fn wait_until_paired(device: &bluer::Device) -> Result<(), String> {
     .map_err(|_| "timed out waiting for incoming pairing to complete".to_string())
 }
 
+/// Drives bonding from this side as soon as the peer connects.
+///
+/// A peer that got there first answers `InProgress`/`AlreadyExists`, which is
+/// success arriving out of order rather than a failure.
 async fn initiate_security(device: &bluer::Device) -> Result<(), String> {
-    println!(
-        "Incoming BLE connection from {}; initiating security/bonding now.",
-        device.address()
-    );
     match tokio::time::timeout(PAIR_TIMEOUT, device.pair()).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => {
             let text = error.to_string();
             if text.contains("InProgress") || text.contains("AlreadyExists") {
-                println!("The Watch is already initiating security; continuing.");
                 wait_until_paired(device).await
             } else {
                 Err(format!("pairing/security failed: {error}"))
@@ -646,7 +793,9 @@ async fn initiate_security(device: &bluer::Device) -> Result<(), String> {
     }
 }
 
-fn report_capture(
+/// Verifies the captured key against the address the kernel saw it used on,
+/// then enrolls it when asked to.
+fn save_capture(
     capture: &crate::enrollment::mgmt::CapturedIrk,
     id: &str,
     save: bool,
@@ -656,12 +805,7 @@ fn report_capture(
             .map_err(|error| format!("kernel reported an invalid RPA: {error}"))?,
     );
     self_check(&capture.key, rpa)?;
-    println!(
-        "IRK obtained and verified for identity {}.",
-        capture.identity_address
-    );
     if !save {
-        println!("No enrollment was changed; re-run with --save to enroll it.");
         return Ok(());
     }
     devices::add(
@@ -676,43 +820,52 @@ fn report_capture(
             minimum_samples: None,
             freshness_ms: None,
         },
-    )?;
-    println!("enrolled {id}; restart omarchy-watch-unlockd");
-    Ok(())
+    )
 }
 
-async fn cleanup_capture_device(adapter: &Adapter, device: &bluer::Device, address: Address) {
+/// Disconnects and forgets the peripheral this flow created, reporting whether
+/// the machine was left as it was found.
+async fn cleanup_capture_device(
+    adapter: &Adapter,
+    device: &bluer::Device,
+    address: Address,
+    progress: Sink<'_>,
+) {
     tokio::time::sleep(Duration::from_secs(1)).await;
     if device.is_connected().await.unwrap_or(false) {
-        println!("Pairing settled; disconnecting the temporary peripheral.");
-        if let Err(error) = device.disconnect().await {
-            eprintln!("warning: clean disconnect failed: {error}");
-        }
+        let _ = device.disconnect().await;
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    if let Err(error) = adapter.remove_device(address).await {
-        eprintln!("warning: could not remove temporary Bluetooth device: {error}");
-    }
+    progress(Progress::Cleanup(Cleanup {
+        label: "Temporary Bluetooth device removed",
+        ok: adapter.remove_device(address).await.is_ok(),
+    }));
+}
+
+/// What one capture attempt is enrolling, and where it reports to.
+struct Capture<'a> {
+    id: &'a str,
+    save: bool,
+    progress: Sink<'a>,
 }
 
 async fn active_capture(
     session: &Session,
     adapter: &Adapter,
-    paired_before: &HashSet<Address>,
+    established: &HashSet<Address>,
     name: &str,
     timeout_secs: u64,
-    id: &str,
-    save: bool,
+    capture: &Capture<'_>,
 ) -> Result<(), String> {
+    let progress = capture.progress;
     let adapter_index = adapter
         .name()
         .strip_prefix("hci")
         .ok_or_else(|| format!("cannot determine controller index from {}", adapter.name()))?
         .parse::<u16>()
         .map_err(|_| format!("cannot determine controller index from {}", adapter.name()))?;
-    println!("Starting direct kernel IRK monitor (sudo may prompt)...");
     let mut monitor = crate::enrollment::mgmt::Monitor::start(adapter_index).await?;
-    println!("Direct kernel IRK monitor is ready.");
+    progress(Progress::Phase(Phase::MonitorReady));
     let _agent = session
         .register_agent(capture_agent())
         .await
@@ -733,40 +886,54 @@ async fn active_capture(
         })
         .await
         .map_err(|error| error.to_string())?;
+    progress(Progress::Phase(Phase::Advertising(name.to_owned())));
 
-    println!(
-        "Advertising as \"{name}\" (heart rate sensor) on {}.",
-        adapter.name()
-    );
-    println!("On the Watch: Settings > Bluetooth > Health Devices, then tap the sensor.");
-    println!("Waiting up to {timeout_secs}s for a connection; Ctrl-C cancels safely.");
     let (device, observed) = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        await_incoming_connection(adapter, paired_before),
+        await_incoming_connection(adapter, established),
     )
     .await
     .map_err(|_| format!("no device connected within {timeout_secs} seconds"))??;
+    progress(Progress::Phase(Phase::Connected(device.alias().await.ok())));
     let result = async {
         initiate_security(&device).await?;
-        println!("BlueZ pairing completed; waiting for the peer IRK.");
-        let capture = tokio::time::timeout(IRK_WAIT, monitor.next_irk())
+        progress(Progress::Phase(Phase::Bonded));
+        let captured = tokio::time::timeout(IRK_WAIT, monitor.next_irk())
             .await
             .map_err(|_| {
                 "bonding completed, but the kernel produced no remote IRK".to_string()
             })??;
-        report_capture(&capture, id, save)
+        progress(Progress::Phase(Phase::IdentityReceived));
+        save_capture(&captured, capture.id, capture.save)?;
+        progress(Progress::Phase(Phase::Verified));
+        Ok(())
     }
     .await;
-    cleanup_capture_device(adapter, &device, observed).await;
+    cleanup_capture_device(adapter, &device, observed, progress).await;
     result
 }
 
-async fn cleanup_new_capture_devices(adapter: &Adapter, paired_before: &HashSet<Address>) {
+/// Undoes what the capture flow left behind when it is cancelled part-way.
+///
+/// Scoped to devices that gained a connection or a bond *during* the flow —
+/// anything `established` already covers is someone else's and is left alone.
+///
+/// A connection a third party opens after `established` was taken is still
+/// swept, and that is the deliberate side of the trade. The narrower rule —
+/// clean only the peer [`await_incoming_connection`] handed back — would
+/// leave a bond behind whenever a peer connects and bonds inside one 200ms
+/// poll, and an abandoned bond holds keys. Losing a redundant link is the
+/// cheaper failure.
+async fn cleanup_new_capture_devices(
+    adapter: &Adapter,
+    established: &HashSet<Address>,
+    progress: Sink<'_>,
+) {
     let Ok(addresses) = adapter.device_addresses().await else {
         return;
     };
     for address in addresses {
-        if paired_before.contains(&address) {
+        if established.contains(&address) {
             continue;
         }
         let Ok(device) = adapter.device(address) else {
@@ -774,8 +941,32 @@ async fn cleanup_new_capture_devices(adapter: &Adapter, paired_before: &HashSet<
         };
         if device.is_connected().await.unwrap_or(false) || device.is_paired().await.unwrap_or(false)
         {
-            cleanup_capture_device(adapter, &device, address).await;
+            cleanup_capture_device(adapter, &device, address, progress).await;
         }
+    }
+}
+
+/// How long to keep retrying a `Pairable` write that `BlueZ` refuses as `Busy`.
+const RESTORE_ATTEMPTS: u32 = 10;
+
+/// Puts back the pairability settings the capture flow overrode.
+///
+/// Tearing down the advertisement queues a controller mode change, and `BlueZ`
+/// answers `Busy` to a `Pairable` write until that lands — reproducibly so on an
+/// adapter that was already pairable. Retrying is what tells that collision
+/// apart from a failure worth reporting.
+async fn restore_pairability(adapter: &Adapter, pairable: bool, timeout: u32) -> bluer::Result<()> {
+    let mut attempts = 0;
+    loop {
+        let result = adapter
+            .set_pairable_timeout(timeout)
+            .await
+            .and(adapter.set_pairable(pairable).await);
+        attempts += 1;
+        if result.is_ok() || attempts == RESTORE_ATTEMPTS {
+            return result;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -784,11 +975,14 @@ async fn advertise_flow(
     timeout_secs: u64,
     id: &str,
     save: bool,
+    cancel: &AtomicBool,
+    progress: Sink<'_>,
 ) -> Result<(), String> {
     let session = Session::new().await.map_err(|error| error.to_string())?;
     let adapter = open_adapter(&session, adapter_name).await?;
+    progress(Progress::Phase(Phase::AdapterReady));
     let name = adapter.alias().await.map_err(|error| error.to_string())?;
-    let paired_before = already_paired(&adapter).await?;
+    let established = established_before(&adapter).await?;
     let previous_pairable = adapter
         .is_pairable()
         .await
@@ -806,26 +1000,28 @@ async fn advertise_flow(
         return Err(error.to_string());
     }
 
+    let capture = Capture { id, save, progress };
+
     let result = tokio::select! {
         result = active_capture(
             &session,
             &adapter,
-            &paired_before,
+            &established,
             &name,
             timeout_secs,
-            id,
-            save,
+            &capture,
         ) => result,
-        _ = tokio::signal::ctrl_c() => {
-            cleanup_new_capture_devices(&adapter, &paired_before).await;
+        () = cancelled(cancel) => {
+            cleanup_new_capture_devices(&adapter, &established, progress).await;
             Err("cancelled".to_string())
         },
     };
-    let restore_timeout = adapter.set_pairable_timeout(previous_timeout).await;
-    let restore_pairable = adapter.set_pairable(previous_pairable).await;
-    if let Err(error) = restore_timeout.and(restore_pairable) {
-        eprintln!("warning: could not restore adapter pairability: {error}");
-    }
+    progress(Progress::Cleanup(Cleanup {
+        label: "Adapter settings restored",
+        ok: restore_pairability(&adapter, previous_pairable, previous_timeout)
+            .await
+            .is_ok(),
+    }));
     result
 }
 
@@ -840,8 +1036,17 @@ pub(crate) fn capture_apple_watch(
     timeout_secs: u64,
     id: &str,
     save: bool,
+    cancel: &AtomicBool,
+    progress: Sink<'_>,
 ) -> Result<(), String> {
-    runtime()?.block_on(advertise_flow(adapter_name, timeout_secs, id, save))
+    runtime()?.block_on(advertise_flow(
+        adapter_name,
+        timeout_secs,
+        id,
+        save,
+        cancel,
+        progress,
+    ))
 }
 
 /// One `[Section]` of a `BlueZ` info file, with its keys in file order.
@@ -1052,10 +1257,13 @@ mod tests {
             0x02, 0xec,
         ];
         let rpa = Address::new([0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa]);
-        assert!(self_check(&irk, rpa).is_ok());
+        assert_eq!(self_check(&irk, rpa), Ok(Checked::Resolved));
         assert!(self_check(&irk, Address::new([0x70, 0x81, 0x94, 0x0d, 0xfb, 0xab])).is_err());
         // A public (non-resolvable) address cannot be checked, and must not fail.
-        assert!(self_check(&irk, Address::new([0x00, 0x1a, 0x7d, 0xda, 0x71, 0x05])).is_ok());
+        assert_eq!(
+            self_check(&irk, Address::new([0x00, 0x1a, 0x7d, 0xda, 0x71, 0x05])),
+            Ok(Checked::NotApplicable)
+        );
     }
 
     #[test]

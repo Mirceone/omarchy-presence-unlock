@@ -1,8 +1,14 @@
 use super::{Observation, Profile};
 use crate::ble::{Advertisement, Needs};
 
-pub(super) static PROFILE: Profile =
-    Profile::new("presence", &["ble"], Needs::nothing(), false, evaluate);
+pub(super) static PROFILE: Profile = Profile::new(
+    "presence",
+    "Proximity only",
+    &["ble"],
+    Needs::nothing(),
+    false,
+    evaluate,
+);
 
 fn evaluate(_advertisement: &Advertisement<'_>) -> Observation {
     Observation::Qualify

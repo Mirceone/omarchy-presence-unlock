@@ -3,19 +3,24 @@ mod client;
 mod devices;
 mod doctor;
 mod enrollment;
+mod interrupt;
+mod keys;
 mod pairing;
 mod setup;
+mod ui;
+mod wizard;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use devices::{Criteria, Overrides};
 use omarchy_watch_unlock_protocol::wire;
+use std::io::IsTerminal;
 use std::time::Duration;
 
 #[derive(Parser)]
 #[command(about = "BLE proximity unlock for Omarchy")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +151,61 @@ enum Commands {
     Confirm,
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
+    /// Interactive menu: enroll a device, manage enrolled devices, choose the
+    /// unlock backend, set quorum, wire the lock screen, run diagnostics, and
+    /// watch live status. Also runs when no subcommand is given, in a
+    /// terminal.
+    Init,
+}
+
+/// Prints what an enrollment reports as it happens.
+///
+/// Enrollments never print for themselves — the interactive menu repaints a
+/// live checklist from the same events — so this is what makes the
+/// non-interactive command say anything at all while it waits.
+fn report_progress(progress: enrollment::Progress) {
+    match progress {
+        enrollment::Progress::Phase(phase) => println!("{}", phase.describe()),
+        enrollment::Progress::Cleanup(cleanup) if cleanup.ok => {
+            println!("{}", cleanup.label);
+        }
+        enrollment::Progress::Cleanup(cleanup) => {
+            eprintln!("warning: could not complete cleanup: {}", cleanup.label);
+        }
+    }
+}
+
+/// Runs one guided enrollment non-interactively.
+///
+/// No key reader here, so Ctrl+C is the only way out and quitting and
+/// cancelling are the same thing: the flag unwinds enrollment so the adapter
+/// stops being pairable, and a second Ctrl+C gives up on that and exits.
+fn enroll_device(
+    provider: &str,
+    adapter: Option<&str>,
+    timeout_secs: u64,
+    id: &str,
+    save: bool,
+) -> Result<(), String> {
+    interrupt::install(|| {});
+    println!("Press Ctrl+C to stop waiting.");
+    enrollment::enroll(
+        provider,
+        &enrollment::Request {
+            adapter,
+            timeout_secs,
+            id,
+            save,
+            cancel: &interrupt::QUIT_REQUESTED,
+            progress: &report_progress,
+        },
+    )?;
+    if save {
+        println!("enrolled {id}; restart omarchy-watch-unlockd");
+    } else {
+        println!("identity obtained and verified; re-run with --save to enroll it");
+    }
+    Ok(())
 }
 
 fn enroll(id: &str) -> Result<(), String> {
@@ -190,9 +250,16 @@ fn confirm() -> Result<(), String> {
 }
 
 fn main() {
-    let result = match Cli::parse().command {
-        Commands::Enroll { id } => enroll(&id),
-        Commands::AddDevice {
+    let Cli { command } = Cli::parse();
+    let result = match command {
+        None if std::io::stdin().is_terminal() => wizard::run(),
+        None => {
+            let _ = Cli::command().print_help();
+            println!();
+            Ok(())
+        }
+        Some(Commands::Enroll { id }) => enroll(&id),
+        Some(Commands::AddDevice {
             id,
             profile,
             address,
@@ -202,7 +269,7 @@ fn main() {
             threshold_dbm,
             minimum_samples,
             freshness_ms,
-        } => devices::add(
+        }) => devices::add(
             &id,
             &profile,
             &Criteria {
@@ -217,53 +284,51 @@ fn main() {
                 freshness_ms,
             },
         ),
-        Commands::RemoveDevice { id } => devices::remove(&id),
-        Commands::Quorum { expression } => devices::set_quorum(&expression),
-        Commands::Backend {
+        Some(Commands::RemoveDevice { id }) => devices::remove(&id),
+        Some(Commands::Quorum { expression }) => devices::set_quorum(&expression),
+        Some(Commands::Backend {
             name,
             process,
             signal,
             command,
-        } => devices::set_backend(&name, process.as_deref(), signal.as_deref(), &command),
-        Commands::Devices { adapter, scan_secs } => {
+        }) => devices::set_backend(&name, process.as_deref(), signal.as_deref(), &command),
+        Some(Commands::Devices { adapter, scan_secs }) => {
             pairing::list_advertising(adapter.as_deref(), scan_secs)
         }
-        Commands::Pair {
+        Some(Commands::Pair {
             adapter,
             scan_secs,
             id,
             save,
-        } => pairing::pair(adapter.as_deref(), scan_secs, &id, save),
-        Commands::EnrollDevice {
+        }) => pairing::pair(adapter.as_deref(), scan_secs, &id, save),
+        Some(Commands::EnrollDevice {
             provider,
             adapter,
             timeout_secs,
             id,
             save,
-        } => enrollment::enroll(
-            &provider,
-            &enrollment::Request {
-                adapter: adapter.as_deref(),
-                timeout_secs,
-                id: &id,
-                save,
-            },
-        ),
-        Commands::Profiles => {
+        }) => enroll_device(&provider, adapter.as_deref(), timeout_secs, &id, save),
+        Some(Commands::Profiles) => {
             enrollment::print_catalog();
             Ok(())
         }
-        Commands::BondInfo { adapter, show_keys } => {
+        Some(Commands::BondInfo { adapter, show_keys }) => {
             pairing::bond_info(adapter.as_deref(), show_keys)
         }
-        Commands::MgmtMonitor { adapter_index } => enrollment::run_mgmt_helper(adapter_index),
-        Commands::Doctor => doctor::doctor(),
-        Commands::Status => status(),
-        Commands::Confirm => confirm(),
-        Commands::SetupOmarchy => setup::setup_omarchy(),
+        Some(Commands::MgmtMonitor { adapter_index }) => enrollment::run_mgmt_helper(adapter_index),
+        Some(Commands::Doctor) => doctor::doctor(),
+        Some(Commands::Status) => status(),
+        Some(Commands::Confirm) => confirm(),
+        Some(Commands::SetupOmarchy) => setup::setup_omarchy(),
+        Some(Commands::Init) => wizard::run(),
     };
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+    // The menu returns normally when Ctrl+C asked it to leave, so that its
+    // destructors run; the conventional status is applied here instead.
+    if interrupt::quit_requested() {
+        std::process::exit(130);
     }
 }

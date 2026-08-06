@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - ci-cd-integration
+      - wizard/menu-integrations
   pull_request:
     branches:
       - main

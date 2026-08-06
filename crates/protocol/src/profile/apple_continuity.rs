@@ -6,6 +6,7 @@ use crate::{
 
 pub(super) static PROFILE: Profile = Profile::new(
     "apple-continuity",
+    "Apple Continuity",
     &["apple-watch"],
     Needs {
         manufacturer_data: true,
