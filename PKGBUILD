@@ -1,9 +1,9 @@
-pkgname=omarchy-watch-unlock
+pkgname=omarchy-presence-unlock
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='BLE device presence unlock for Omarchy'
 arch=('x86_64')
-url='https://github.com/mirceone/omarchy-watch-unlock'
+url='https://github.com/mirceone/omarchy-presence-unlock'
 license=('MIT')
 depends=('bluez' 'pam' 'omarchy')
 makedepends=('cargo' 'git')
@@ -34,10 +34,10 @@ build() {
 
 package() {
   cd "$srcdir/$pkgname"
-  install -Dm755 target/release/omarchy-watch-unlock "$pkgdir/usr/bin/omarchy-watch-unlock"
-  install -Dm755 target/release/omarchy-watch-unlockd "$pkgdir/usr/bin/omarchy-watch-unlockd"
-  install -Dm755 target/release/libpam_omarchy_watch_unlock.so "$pkgdir/usr/lib/security/pam_omarchy_watch_unlock.so"
-  install -Dm644 packaging/omarchy-watch-unlockd.service "$pkgdir/usr/lib/systemd/user/omarchy-watch-unlockd.service"
-  install -Dm644 packaging/omarchy-lock-watch.pam "$pkgdir/usr/share/omarchy-watch-unlock/omarchy-lock-watch.pam"
+  install -Dm755 target/release/omarchy-presence-unlock "$pkgdir/usr/bin/omarchy-presence-unlock"
+  install -Dm755 target/release/omarchy-presence-unlockd "$pkgdir/usr/bin/omarchy-presence-unlockd"
+  install -Dm755 target/release/libpam_omarchy_presence_unlock.so "$pkgdir/usr/lib/security/pam_omarchy_presence_unlock.so"
+  install -Dm644 packaging/omarchy-presence-unlockd.service "$pkgdir/usr/lib/systemd/user/omarchy-presence-unlockd.service"
+  install -Dm644 packaging/omarchy-lock-presence.pam "$pkgdir/usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

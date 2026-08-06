@@ -5,7 +5,7 @@
 //! Every action here is a thin front-end over the same internals the
 //! equivalent subcommand uses — `devices`, `enrollment`, `setup`, `doctor`,
 //! `client` — so nothing here has logic the non-interactive CLI lacks.
-//! Bare `omarchy-watch-unlock` in a terminal, or `init` explicitly, opens
+//! Bare `omarchy-presence-unlock` in a terminal, or `init` explicitly, opens
 //! this menu; every other subcommand is unaffected, so scripts and agents
 //! never hit a prompt.
 //!
@@ -24,7 +24,7 @@
 use crate::ui::{Frame, Mark, Menu, Screen};
 use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
 use enrollment::{Cleanup, Phase, Progress};
-use omarchy_watch_unlock_protocol::{config::ConfigFile, wire};
+use omarchy_presence_unlock_protocol::{config::ConfigFile, wire};
 use std::{
     process::Command,
     sync::{
@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const UNLOCKD: &str = "omarchy-watch-unlockd";
+const UNLOCKD: &str = "omarchy-presence-unlockd";
 
 /// `DECSET`/`DECRST` 1049 — switch to and from the terminal's alternate
 /// screen buffer. Supported by every terminal this app can plausibly run

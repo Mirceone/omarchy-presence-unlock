@@ -1,7 +1,7 @@
 //! Preflight checks. Every failure names the command that fixes it.
 
 use crate::client;
-use omarchy_watch_unlock_protocol::{
+use omarchy_presence_unlock_protocol::{
     config::{Backend, ConfigFile},
     paths::{config_path, current_socket_path},
     wire,
@@ -61,7 +61,7 @@ pub fn doctor() -> Result<(), String> {
         .count();
     if devices != settings.devices.len() {
         return Err(format!(
-            "config lists {} device(s) but the daemon is running {devices}; restart omarchy-watch-unlockd",
+            "config lists {} device(s) but the daemon is running {devices}; restart omarchy-presence-unlockd",
             settings.devices.len()
         ));
     }

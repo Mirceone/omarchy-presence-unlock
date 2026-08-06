@@ -12,7 +12,7 @@ mod wizard;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use devices::{Criteria, Overrides};
-use omarchy_watch_unlock_protocol::wire;
+use omarchy_presence_unlock_protocol::wire;
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -201,7 +201,7 @@ fn enroll_device(
         },
     )?;
     if save {
-        println!("enrolled {id}; restart omarchy-watch-unlockd");
+        println!("enrolled {id}; restart omarchy-presence-unlockd");
     } else {
         println!("identity obtained and verified; re-run with --save to enroll it");
     }
@@ -224,7 +224,7 @@ fn enroll(id: &str) -> Result<(), String> {
             freshness_ms: None,
         },
     )?;
-    println!("Enrolled {id}. Start with: systemctl --user enable --now omarchy-watch-unlockd");
+    println!("Enrolled {id}. Start with: systemctl --user enable --now omarchy-presence-unlockd");
     Ok(())
 }
 

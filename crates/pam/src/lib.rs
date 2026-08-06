@@ -1,5 +1,5 @@
 use nix::unistd::Uid;
-use omarchy_watch_unlock_protocol::{paths, wire};
+use omarchy_presence_unlock_protocol::{paths, wire};
 use pam::{PamHandle, PamModule, PamReturnCode, export_pam_module, get_user};
 use std::{
     ffi::{CStr, c_uint},
@@ -11,10 +11,10 @@ use std::{
     time::Duration,
 };
 
-struct WatchPam;
-export_pam_module!(WatchPam);
+struct PresencePam;
+export_pam_module!(PresencePam);
 
-impl PamModule for WatchPam {
+impl PamModule for PresencePam {
     fn authenticate(handle: &PamHandle, _: Vec<&CStr>, _: c_uint) -> PamReturnCode {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| authenticate(*handle)));

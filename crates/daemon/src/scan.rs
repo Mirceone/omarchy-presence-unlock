@@ -7,7 +7,7 @@
 use crate::{clock::boottime_ms, control::Service};
 use bluer::{AdapterEvent, DiscoveryFilter, DiscoveryTransport};
 use futures_util::StreamExt;
-use omarchy_watch_unlock_protocol::{Advertisement, Needs};
+use omarchy_presence_unlock_protocol::{Advertisement, Needs};
 use std::sync::Arc;
 use thiserror::Error;
 

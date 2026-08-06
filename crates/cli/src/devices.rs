@@ -2,7 +2,7 @@
 
 use crate::atomic::write_atomic;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use omarchy_watch_unlock_protocol::{
+use omarchy_presence_unlock_protocol::{
     ble::parse_address,
     config::{CURRENT_SCHEMA, ConfigFile},
     paths,
@@ -125,7 +125,7 @@ fn migrate(document: &mut DocumentMut) -> Result<(), String> {
         for table in device_array(document)?.iter_mut() {
             let legacy = table.get("kind").and_then(Item::as_str).map(str::to_owned);
             if let Some(legacy) = legacy {
-                let canonical = omarchy_watch_unlock_protocol::profile::find(&legacy)
+                let canonical = omarchy_presence_unlock_protocol::profile::find(&legacy)
                     .map_or(legacy.as_str(), |profile| profile.id());
                 table["profile"] = value(canonical);
                 table.remove("kind");
@@ -571,9 +571,9 @@ mod tests {
         assert!(text.contains("unlock_signal = \"SIGUSR1\""));
         assert_eq!(
             ConfigFile::parse(&text).unwrap().backend().unwrap(),
-            omarchy_watch_unlock_protocol::config::Backend::ProcessSignal {
+            omarchy_presence_unlock_protocol::config::Backend::ProcessSignal {
                 process: "swaylock".into(),
-                signal: omarchy_watch_unlock_protocol::config::SignalKind::Usr1,
+                signal: omarchy_presence_unlock_protocol::config::SignalKind::Usr1,
             }
         );
     }

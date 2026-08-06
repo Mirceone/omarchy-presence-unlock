@@ -1,7 +1,7 @@
 //! Lock-screen integration: Hyprlock keybinding, or Omarchy's Quattro plugin.
 
 use crate::{atomic::write_atomic, devices};
-use omarchy_watch_unlock_protocol::paths;
+use omarchy_presence_unlock_protocol::paths;
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -44,9 +44,9 @@ fn setup_hyprlock() -> Result<(), String> {
     }
     devices::set_backend("hyprlock-confirm", None, None, &[])?;
     let bindings = home_dir()?.join(".config/hypr/bindings.lua");
-    let binding_marker = "-- omarchy-watch-unlock Alt+Enter confirmation";
+    let binding_marker = "-- omarchy-presence-unlock Alt+Enter confirmation";
     let binding = format!(
-        "\n{binding_marker}\no.bind(\"ALT + RETURN\", \"Watch unlock confirmation\", \"omarchy-watch-unlock confirm\", {{ locked = true }})\n"
+        "\n{binding_marker}\no.bind(\"ALT + RETURN\", \"Presence unlock confirmation\", \"omarchy-presence-unlock confirm\", {{ locked = true }})\n"
     );
     let binding_text = fs::read_to_string(&bindings).map_err(|error| error.to_string())?;
     if !binding_text.contains(binding_marker) {
@@ -68,43 +68,45 @@ fn setup_hyprlock() -> Result<(), String> {
             String::from_utf8_lossy(&validation.stdout)
         );
     }
-    println!("Enabled Alt+Enter unlock confirmation for Hyprlock. Restart omarchy-watch-unlockd.");
+    println!(
+        "Enabled Alt+Enter unlock confirmation for Hyprlock. Restart omarchy-presence-unlockd."
+    );
     Ok(())
 }
 
-const WATCH_BLOCK: &str = r"
-  property bool watchAuthenticating: false
-  property int watchAttempts: 0
-  readonly property bool watchConfigured: true
+const PRESENCE_BLOCK: &str = r"
+  property bool presenceAuthenticating: false
+  property int presenceAttempts: 0
+  readonly property bool presenceConfigured: true
 
-  function startWatchAuth() {
-    if (!lockRequested || !sessionLock.secure || watchAuthenticating || watchPam.active) return
-    if (watchAttempts >= 12) return
-    watchAttempts += 1
-    watchAuthenticating = true
-    if (!watchPam.start()) watchAuthenticating = false
+  function startPresenceAuth() {
+    if (!lockRequested || !sessionLock.secure || presenceAuthenticating || presencePam.active) return
+    if (presenceAttempts >= 12) return
+    presenceAttempts += 1
+    presenceAuthenticating = true
+    if (!presencePam.start()) presenceAuthenticating = false
   }
 ";
 
-const WATCH_PAM: &str = r#"
+const PRESENCE_PAM: &str = r#"
   PamContext {
-    id: watchPam
-    config: "omarchy-lock-watch"
+    id: presencePam
+    config: "omarchy-lock-presence"
     user: root.userName
     onCompleted: function(result) {
-      root.watchAuthenticating = false
+      root.presenceAuthenticating = false
       if (!root.lockRequested) return
       if (result === PamResult.Success) root.finishUnlock()
-      else watchRetryTimer.restart()
+      else presenceRetryTimer.restart()
     }
-    onError: function(error) { root.watchAuthenticating = false; if (root.lockRequested) watchRetryTimer.restart() }
+    onError: function(error) { root.presenceAuthenticating = false; if (root.lockRequested) presenceRetryTimer.restart() }
   }
 
   Timer {
-    id: watchRetryTimer
+    id: presenceRetryTimer
     interval: 250
     repeat: false
-    onTriggered: root.startWatchAuth()
+    onTriggered: root.startPresenceAuth()
   }
 "#;
 
@@ -138,7 +140,7 @@ fn setup_quattro() -> Result<(), String> {
         run(Command::new("omarchy").args(["plugin", "clone", "omarchy.lock"]))?;
     }
     let mut qml = fs::read_to_string(&target).map_err(|e| e.to_string())?;
-    if !qml.contains("id: watchPam") {
+    if !qml.contains("id: presencePam") {
         if let Some(missing) = missing_anchor(&qml) {
             return Err(format!(
                 "unsupported Omarchy lock plugin layout; no changes written (missing anchor: {missing:?})"
@@ -146,28 +148,28 @@ fn setup_quattro() -> Result<(), String> {
         }
         qml = qml.replacen(
             QML_ANCHORS[0],
-            &format!("{}\n{WATCH_BLOCK}", QML_ANCHORS[0]),
+            &format!("{}\n{PRESENCE_BLOCK}", QML_ANCHORS[0]),
             1,
         );
         qml = qml.replacen(
             QML_ANCHORS[1],
-            "onWakeRequested: { root.runWake(); root.startWatchAuth() }",
+            "onWakeRequested: { root.runWake(); root.startPresenceAuth() }",
             1,
         );
         qml = qml.replacen(
             QML_ANCHORS[2],
-            "    fingerprintRetryTimer.stop()\n    watchRetryTimer.stop()\n    watchAttempts = 0\n    if (watchPam.active) watchPam.abort()",
+            "    fingerprintRetryTimer.stop()\n    presenceRetryTimer.stop()\n    presenceAttempts = 0\n    if (presencePam.active) presencePam.abort()",
             1,
         );
         qml = qml.replacen(
             QML_ANCHORS[3],
-            &format!("{WATCH_PAM}\n  Timer {{\n    id: fingerprintRetryTimer"),
+            &format!("{PRESENCE_PAM}\n  Timer {{\n    id: fingerprintRetryTimer"),
             1,
         );
-        if !qml.contains("id: watchPam") {
+        if !qml.contains("id: presencePam") {
             return Err("unsupported Omarchy lock plugin layout; no changes written".into());
         }
-        let backup = target.with_extension("qml.owu.bak");
+        let backup = target.with_extension("qml.opu.bak");
         fs::copy(&target, &backup).map_err(|e| e.to_string())?;
         write_atomic(&target, &qml, 0o644)?;
         println!("Backed up the original plugin to {}", backup.display());
@@ -175,7 +177,7 @@ fn setup_quattro() -> Result<(), String> {
     let policy = paths::pam_policy_source();
     if !policy.exists() {
         return Err(format!(
-            "PAM policy template is missing at {}; set OWU_DATADIR or reinstall the package",
+            "PAM policy template is missing at {}; set OPU_DATADIR or reinstall the package",
             policy.display()
         ));
     }
@@ -184,7 +186,7 @@ fn setup_quattro() -> Result<(), String> {
         "-m",
         "0644",
         policy.to_str().ok_or("invalid policy path")?,
-        "/etc/pam.d/omarchy-lock-watch",
+        "/etc/pam.d/omarchy-lock-presence",
     ]))?;
     println!(
         "Installed local.lock presence adapter. Restart Omarchy Shell or log out/in to load it."

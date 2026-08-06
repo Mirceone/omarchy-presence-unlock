@@ -1,4 +1,4 @@
-# Omarchy Watch Unlock
+# Omarchy Presence Unlock
 
 Unlock Omarchy with a nearby Bluetooth device. Apple Watch is the
 best-supported option; phones, bands, fobs, and other BLE devices can also be
@@ -21,8 +21,8 @@ Apple Watch enrollment happens entirely on Linux; no Mac is required.
 ## Install
 
 ```sh
-git clone https://github.com/mirceone/omarchy-watch-unlock.git
-cd omarchy-watch-unlock
+git clone https://github.com/mirceone/omarchy-presence-unlock.git
+cd omarchy-presence-unlock
 ./install.sh
 ```
 
@@ -34,10 +34,10 @@ safe.
 ## Set up with the wizard
 
 ```sh
-omarchy-watch-unlock init
+omarchy-presence-unlock init
 ```
 
-Running `omarchy-watch-unlock` without a subcommand opens the same full-screen
+Running `omarchy-presence-unlock` without a subcommand opens the same full-screen
 wizard in a terminal. It handles enrollment, enrolled-device management,
 unlock settings, lock-screen integration, diagnostics, and live status.
 
@@ -83,10 +83,10 @@ addresses cannot be tracked reliably by address and need an IRK instead.
 The wizard can install the correct lock-screen integration, or you can run:
 
 ```sh
-omarchy-watch-unlock setup-omarchy
-systemctl --user restart omarchy-watch-unlockd
-omarchy-watch-unlock doctor
-omarchy-watch-unlock status
+omarchy-presence-unlock setup-omarchy
+systemctl --user restart omarchy-presence-unlockd
+omarchy-presence-unlock doctor
+omarchy-presence-unlock status
 ```
 
 On Hyprlock, press `Alt+Enter` while the lock screen is visible to confirm an
@@ -99,8 +99,8 @@ quorum result.
 Scan and enroll proximity devices manually:
 
 ```sh
-omarchy-watch-unlock devices
-omarchy-watch-unlock add-device phone --address AA:BB:CC:DD:EE:FF
+omarchy-presence-unlock devices
+omarchy-presence-unlock add-device phone --address AA:BB:CC:DD:EE:FF
 ```
 
 Identity criteria combine with AND. At least one of `--address`, `--irk`,
@@ -108,34 +108,34 @@ Identity criteria combine with AND. At least one of `--address`, `--irk`,
 tuned when adding a device:
 
 ```sh
-omarchy-watch-unlock add-device fob --address AA:BB:CC:DD:EE:FF \
+omarchy-presence-unlock add-device fob --address AA:BB:CC:DD:EE:FF \
   --threshold-dbm -60 --minimum-samples 3 --freshness-ms 2000
 ```
 
 Choose how many enrolled devices must be present:
 
 ```sh
-omarchy-watch-unlock quorum any
-omarchy-watch-unlock quorum all
-omarchy-watch-unlock quorum at-least:2
+omarchy-presence-unlock quorum any
+omarchy-presence-unlock quorum all
+omarchy-presence-unlock quorum at-least:2
 ```
 
 Choose how an authorized request releases the lock screen:
 
 ```sh
-omarchy-watch-unlock backend hyprlock-confirm
-omarchy-watch-unlock backend process-signal --process swaylock --signal SIGUSR1
-omarchy-watch-unlock backend command -- loginctl unlock-session
-omarchy-watch-unlock backend disabled
+omarchy-presence-unlock backend hyprlock-confirm
+omarchy-presence-unlock backend process-signal --process swaylock --signal SIGUSR1
+omarchy-presence-unlock backend command -- loginctl unlock-session
+omarchy-presence-unlock backend disabled
 ```
 
-Run `omarchy-watch-unlock --help` or a subcommand with `--help` for the complete
+Run `omarchy-presence-unlock --help` or a subcommand with `--help` for the complete
 CLI reference.
 
 ## Configuration
 
 Configuration is stored at
-`~/.config/omarchy-watch-unlock/config.toml` with mode `0600`. Older schema 1
+`~/.config/omarchy-presence-unlock/config.toml` with mode `0600`. Older schema 1
 and 2 files remain readable and are migrated to schema 3 by the next CLI edit.
 
 ```toml
@@ -154,7 +154,7 @@ minimum_samples = 3
 List the profiles and enrollment providers compiled into the installed build:
 
 ```sh
-omarchy-watch-unlock profiles
+omarchy-presence-unlock profiles
 ```
 
 ## Advanced usage
@@ -162,31 +162,31 @@ omarchy-watch-unlock profiles
 Enroll an Apple Watch without the wizard by pausing the daemon first:
 
 ```sh
-systemctl --user stop omarchy-watch-unlockd
-omarchy-watch-unlock enroll-device --provider apple-watch --save --id watch
-systemctl --user start omarchy-watch-unlockd
+systemctl --user stop omarchy-presence-unlockd
+omarchy-presence-unlock enroll-device --provider apple-watch --save --id watch
+systemctl --user start omarchy-presence-unlockd
 ```
 
 Use `--adapter hci1` to select a non-default adapter or `--timeout-secs` to
 change the default five-minute wait. Without `--save`, enrollment verifies the
 identity without changing the configuration. If you already have a macOS
-Remote IRK, `omarchy-watch-unlock enroll` reads it without echoing it.
+Remote IRK, `omarchy-presence-unlock enroll` reads it without echoing it.
 
 The `pair` command is an experimental central-initiated pairing diagnostic. It
 is not the supported Apple Watch enrollment path, and `pair --save` creates an
 `apple-continuity` enrollment rather than a generic proximity device.
 
 ```sh
-omarchy-watch-unlock pair --scan-secs 20
-omarchy-watch-unlock bond-info
-omarchy-watch-unlock bond-info --show-keys
+omarchy-presence-unlock pair --scan-secs 20
+omarchy-presence-unlock bond-info
+omarchy-presence-unlock bond-info --show-keys
 ```
 
 `bond-info` redacts key material unless `--show-keys` is explicitly supplied.
 
 ## Troubleshooting
 
-- Run `omarchy-watch-unlock doctor` first; it checks the configuration, daemon
+- Run `omarchy-presence-unlock doctor` first; it checks the configuration, daemon
   socket, and lock-screen integration.
 - `DENY no-device` with `rssi=-` means nothing has matched since the daemon
   started. Wake the device and bring it closer.
@@ -197,7 +197,7 @@ omarchy-watch-unlock bond-info --show-keys
 - Check the daemon log with:
 
   ```sh
-  journalctl --user -u omarchy-watch-unlockd --no-pager -n 100
+  journalctl --user -u omarchy-presence-unlockd --no-pager -n 100
   ```
 
 ## Architecture

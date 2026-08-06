@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-watch-unlockd"
+name = "omarchy-presence-unlockd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,6 @@ workspace = true
 bluer.workspace = true
 futures-util.workspace = true
 nix = { workspace = true, features = ["user", "signal"] }
-omarchy-watch-unlock-protocol = { path = "../protocol" }
+omarchy-presence-unlock-protocol = { path = "../protocol" }
 thiserror.workspace = true
 tokio.workspace = true

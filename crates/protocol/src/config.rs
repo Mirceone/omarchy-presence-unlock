@@ -169,7 +169,7 @@ pub enum ConfigError {
     UnsupportedProfile(String, String),
     #[error("duplicate device id {0}")]
     DuplicateDevice(String),
-    #[error("no devices are configured; run `omarchy-watch-unlock enroll`")]
+    #[error("no devices are configured; run `omarchy-presence-unlock enroll`")]
     NoDevices,
     #[error("unsupported unlock backend: {0}")]
     Backend(String),

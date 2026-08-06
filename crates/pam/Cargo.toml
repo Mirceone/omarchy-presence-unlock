@@ -1,5 +1,5 @@
 [package]
-name = "pam_omarchy_watch_unlock"
+name = "pam_omarchy_presence_unlock"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,5 @@ workspace = true
 
 [dependencies]
 nix = { workspace = true, features = ["user"] }
-omarchy-watch-unlock-protocol = { path = "../protocol", default-features = false }
+omarchy-presence-unlock-protocol = { path = "../protocol", default-features = false }
 pam.workspace = true
