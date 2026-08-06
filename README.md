@@ -1,53 +1,24 @@
 # Omarchy Watch Unlock
 
-BLE device presence unlock for Omarchy. An Apple Watch is the best-supported
-device, but any BLE device that advertises can gate an unlock.
+Unlock Omarchy with a nearby Bluetooth device. Apple Watch is the
+best-supported option; phones, bands, fobs, and other BLE devices can also be
+used for proximity-only authorization.
 
-It is a personal-convenience feature, not a replacement for password or
-fingerprint authentication: a capable relay/replay attacker is out of scope.
-
-The control socket authorizes any process running as the same user, so the
-`Alt+Enter` confirmation is a convenience gesture, not an attestation: a process
-already running in your session can send the same confirmation while the device
-is nearby. Anything with code execution in your session is outside this
-feature's threat model.
-
-## Architecture
-
-```text
-BlueZ scan  ->  Advertisement  ->  Identity  ->  Profile  ->  Eligibility
-                (transport-        (is this     (what does    (per device)
-                 neutral)           mine?)       it claim?)        |
-                                                                   v
-       PAM / CLI  <->  control socket  <->  Fleet quorum  ->  Unlocker
-```
-
-Each stage is independent:
-
-| To add | Change |
-| --- | --- |
-| A device family with new advertisement semantics | one module and descriptor in the compile-time profile registry |
-| A credential acquisition flow | one CLI enrollment-provider module and registry entry |
-| A generic phone, fob, or beacon | configuration only: use the `presence` profile and identity criteria |
-| A way of recognising a device | one criterion on `Identity` |
-| A lock screen | one `Unlocker` implementation |
-| A radio transport | one producer of `Advertisement` |
-
-Crates: `protocol` (profile registry, identity, policy; no D-Bus or PAM),
-`daemon` (BlueZ scan, control socket, unlockers), `cli` (enrollment-provider
-registry and administration), and `pam`.
+This is a convenience feature, not a replacement for your password or
+fingerprint. It does not defend against Bluetooth relay/replay attacks or a
+process that already has access to your user session. Password and fingerprint
+authentication remain available.
 
 ## Requirements
 
-- Omarchy on Arch Linux with BlueZ, PAM, and a systemd user session
+- Omarchy on x86-64 Arch Linux, with BlueZ, PAM, and a systemd user session
 - a working Bluetooth LE adapter managed by `bluetoothd`
 - Rust 1.88 or newer and Cargo when installing from source
-- `sudo` access for installation and the narrowly scoped Watch IRK monitor
+- `sudo` access for installation and Apple Watch enrollment
 
-The package targets x86-64. Apple Watch enrollment is performed entirely on
-Linux; a Mac is not required.
+Apple Watch enrollment happens entirely on Linux; no Mac is required.
 
-## Install from source
+## Install
 
 ```sh
 git clone https://github.com/mirceone/omarchy-watch-unlock.git
@@ -55,65 +26,61 @@ cd omarchy-watch-unlock
 ./install.sh
 ```
 
-The installer builds the locked release workspace, writes the CLI, daemon, PAM
-module, and service assets under `/usr`, then enables the systemd user service.
-It does not modify enrollment, Hyprland, or PAM configuration. It is safe to
-rerun after source changes.
+The installer builds and installs the CLI, daemon, PAM module, and systemd user
+service under `/usr`. It enables the daemon but does not enroll a device or
+change your lock-screen configuration. Re-running it after source changes is
+safe.
 
-## Guided setup
+## Set up with the wizard
 
 ```sh
 omarchy-watch-unlock init
 ```
 
-Run this in a terminal (bare `omarchy-watch-unlock`, with no arguments, does
-the same when it detects one) for a full-screen walk through enrollment,
-backend selection, and lock-screen integration — the same steps as the manual
-quick start below, without needing to remember the command order. Re-running
-it is safe: it does not undo an already-enrolled device or a chosen backend.
+Running `omarchy-watch-unlock` without a subcommand opens the same full-screen
+wizard in a terminal. It handles enrollment, enrolled-device management,
+unlock settings, lock-screen integration, diagnostics, and live status.
 
-Enrolling an Apple Watch is a three-step flow: instructions, a live pairing
-checklist that closes itself on success, timeout, or error, and a summary of
-what was enrolled. Enrolling anything else is a scan and a device picker, and
-the menu says so — that route records an address for proximity detection and
-does not pair or read a device's own lock state.
+The controls are consistent throughout the wizard:
 
-Keys are the same on every screen:
-
-| Key | Meaning |
+| Key | Action |
 | --- | --- |
-| `Enter` | select or continue |
-| `Esc` | cancel or back out of the current screen |
-| `Ctrl+C` | leave the wizard |
+| `Enter` | Select or continue |
+| `Esc` | Cancel the current operation or go back |
+| `Ctrl+C` | Leave the wizard |
 
-Cancelling a pairing stops it, undoes the temporary Bluetooth state, restarts
-the unlock service, and says which of those succeeded. `Ctrl+C` is never
-needed to dismiss a screen that has finished.
+Pairing waits end on success, timeout, error, or `Esc`, then show a result
+screen with the next available actions. You do not need `Ctrl+C` to dismiss a
+completed operation.
 
-## Apple Watch manual quick start
+### Apple Watch
 
-Stop the daemon's continuous scan while the PC temporarily advertises as a
-Heart Rate Sensor:
+Choose **Apple Watch** in the enrollment menu and follow the checklist. When
+prompted, open **Settings > Bluetooth > Health Devices** on the Watch, select
+the computer's Bluetooth name, and accept pairing.
 
-```sh
-systemctl --user stop omarchy-watch-unlockd
-omarchy-watch-unlock enroll-device \
-  --provider apple-watch \
-  --save \
-  --id watch \
-  --timeout-secs 300
-systemctl --user start omarchy-watch-unlockd
-```
+The wizard temporarily pauses the unlock daemon, advertises the computer as a
+Heart Rate Sensor, captures and verifies the Watch identity, then attempts to
+clean up the temporary Bluetooth state and restart the daemon. Any cleanup
+failure is shown in the result. A narrowly scoped `sudo` helper reads the
+kernel IRK event; do not run the whole CLI as root.
 
-The command starts a private `sudo` helper; do not run the whole CLI as root.
-When prompted, open **Settings > Bluetooth > Health Devices** on the Watch,
-select the PC's Bluetooth name, and accept pairing. It reports each stage as
-it happens — adapter, monitor, advertising, connection, pairing, identity —
-and a successful run ends with `Device identity verified` followed by
-`enrolled watch; restart omarchy-watch-unlockd`.
+Apple Watch is the only built-in profile that also reports whether the device
+itself is locked. A locked Watch, or one with Apple Auto Unlock disabled, does
+not authorize an unlock.
 
-Install the integration appropriate for the current Omarchy build, restart the
-daemon after the configuration edit, and verify the complete installation:
+### Other Bluetooth devices
+
+Choose **Other Bluetooth device** to scan and select a nearby advertiser. This
+does not pair with the device: it saves its address for proximity detection.
+
+These devices are **proximity only**. Their presence can authorize an unlock,
+but they cannot prove that they are unlocked. Devices that rotate private
+addresses cannot be tracked reliably by address and need an IRK instead.
+
+## Finish and verify setup
+
+The wizard can install the correct lock-screen integration, or you can run:
 
 ```sh
 omarchy-watch-unlock setup-omarchy
@@ -122,48 +89,38 @@ omarchy-watch-unlock doctor
 omarchy-watch-unlock status
 ```
 
-On Hyprlock, press `Alt+Enter` while the lock screen is visible. Quattro builds
-use the local lock plugin and dedicated PAM policy instead. Password and
-fingerprint authentication remain available.
+On Hyprlock, press `Alt+Enter` while the lock screen is visible to confirm an
+unlock. Omarchy Quattro builds use the local lock plugin and its dedicated PAM
+policy instead. `status` prints each device's decision followed by the overall
+quorum result.
 
-The Watch profile is the only built-in profile that reports the device's own
-lock state. Authorization is revoked when the Watch says it is locked or Apple
-Auto Unlock is disabled.
+## Useful CLI commands
 
-## Other BLE devices
-
-List what the adapter can see, then enroll by whichever criterion is stable:
+Scan and enroll proximity devices manually:
 
 ```sh
 omarchy-watch-unlock devices
 omarchy-watch-unlock add-device phone --address AA:BB:CC:DD:EE:FF
-omarchy-watch-unlock add-device fob   --service-uuid 0000fe9f-0000-1000-8000-00805f9b34fb
-omarchy-watch-unlock add-device band  --name-prefix "Mi Band"
 ```
 
-Criteria combine with AND, and a device with none is refused. A device that
-rotates private addresses (most phones, by design) cannot be matched by address;
-enroll it with `--irk <base64>` so its addresses resolve.
-
-These devices are **proximity only**: they assert nothing about their own lock
-state, so presence alone authorizes. `status` reports their profile as `presence`.
-
-Per-device policy overrides:
+Identity criteria combine with AND. At least one of `--address`, `--irk`,
+`--service-uuid`, or `--name-prefix` is required. Per-device policy can be
+tuned when adding a device:
 
 ```sh
 omarchy-watch-unlock add-device fob --address AA:BB:CC:DD:EE:FF \
   --threshold-dbm -60 --minimum-samples 3 --freshness-ms 2000
 ```
 
-### Requiring more than one device
+Choose how many enrolled devices must be present:
 
 ```sh
-omarchy-watch-unlock quorum all           # every enrolled device must be present
+omarchy-watch-unlock quorum any
+omarchy-watch-unlock quorum all
 omarchy-watch-unlock quorum at-least:2
-omarchy-watch-unlock quorum any           # the default
 ```
 
-## Unlock backends
+Choose how an authorized request releases the lock screen:
 
 ```sh
 omarchy-watch-unlock backend hyprlock-confirm
@@ -172,29 +129,14 @@ omarchy-watch-unlock backend command -- loginctl unlock-session
 omarchy-watch-unlock backend disabled
 ```
 
-`process-signal` covers lock screens that release on `SIGUSR1`/`SIGUSR2` but are
-not Hyprlock; `--signal` defaults to `SIGUSR1`. Switching backends clears the
-previous backend's keys, so a stale `unlock_command` never survives a change.
-
-## Status
-
-```sh
-$ omarchy-watch-unlock status
-DEVICE watch apple-continuity ALLOW rssi=-66
-DEVICE phone presence DENY insufficient-samples rssi=-80
-DENY quorum
-```
-
-One line per enrolled device, then the fleet's aggregate decision. Presence
-denial reasons are stable tokens: `no-device`, `stale`,
-`insufficient-samples`, and `quorum`. The `confirm` command can additionally
-report `not-locked`, `not-eligible`, `backend`, or `unlock-failed`.
+Run `omarchy-watch-unlock --help` or a subcommand with `--help` for the complete
+CLI reference.
 
 ## Configuration
 
-`~/.config/omarchy-watch-unlock/config.toml`, mode 0600. Schema 1 and 2 files
-are read compatibly; the first CLI edit migrates them to schema 3 in place,
-preserving comments and converting `kind` to a canonical profile id.
+Configuration is stored at
+`~/.config/omarchy-watch-unlock/config.toml` with mode `0600`. Older schema 1
+and 2 files remain readable and are migrated to schema 3 by the next CLI edit.
 
 ```toml
 schema_version = 3
@@ -203,62 +145,21 @@ unlock_backend = "hyprlock-confirm"
 # adapter = "hci1"
 
 [[device]]
-id = "watch"
-profile = "apple-continuity"
-irk_base64 = "..."
-threshold_dbm = -75
-
-[[device]]
 id = "phone"
 profile = "presence"
 address = "AA:BB:CC:DD:EE:FF"
-threshold_dbm = -70
 minimum_samples = 3
 ```
 
-Only the advertisement fields some enrolled device actually reads are fetched
-from BlueZ; the daemon logs which reads it skips at startup.
-
-Profiles are audited, compile-time advertisement decoders. List this build's
-profiles and enrollment providers with:
+List the profiles and enrollment providers compiled into the installed build:
 
 ```sh
 omarchy-watch-unlock profiles
 ```
 
-## How Apple Watch enrollment works
+## Advanced usage
 
-The `apple-watch` enrollment provider implements the Watch-tested path. The PC
-advertises its existing Bluetooth alias, normally the hostname, as a Heart Rate
-Sensor. Select it on the Watch under
-**Settings > Bluetooth > Health Devices**:
-
-```sh
-omarchy-watch-unlock enroll-device --provider apple-watch --timeout-secs 300
-omarchy-watch-unlock enroll-device --provider apple-watch --save --id watch
-```
-
-The command:
-
-1. starts a narrowly scoped `sudo` helper that listens for the kernel's
-   `MGMT_EV_NEW_IRK` event;
-2. registers the tested Heart Rate, Device Information, Battery, and protected
-   GATT services;
-3. uses the `NoInputNoOutput`/Just Works agent profile;
-4. calls BlueZ `Device1.Pair()` immediately when the Watch connects;
-5. verifies the captured key against the Watch's resolvable private address; and
-6. disconnects, removes the temporary BlueZ bond, and restores the adapter's
-   previous pairability settings.
-
-The IRK is never printed. Without `--save`, the provider reports the verified
-result and changes no enrollment. With `--save`, it writes an
-`apple-continuity` enrollment to `config.toml`. The temporary bond is removed
-from the PC. watchOS may retain a stale Health Device entry after a test run;
-forget that entry on the Watch before repeating enrollment.
-
-`--adapter hci1` selects a non-default adapter. Stop
-`omarchy-watch-unlockd` while enrolling because the daemon otherwise holds a
-continuous LE scan:
+Enroll an Apple Watch without the wizard by pausing the daemon first:
 
 ```sh
 systemctl --user stop omarchy-watch-unlockd
@@ -266,65 +167,51 @@ omarchy-watch-unlock enroll-device --provider apple-watch --save --id watch
 systemctl --user start omarchy-watch-unlockd
 ```
 
-If you already have a macOS Remote IRK, the legacy `enroll` command remains
-available and reads the base64 key without echoing it:
+Use `--adapter hci1` to select a non-default adapter or `--timeout-secs` to
+change the default five-minute wait. Without `--save`, enrollment verifies the
+identity without changing the configuration. If you already have a macOS
+Remote IRK, `omarchy-watch-unlock enroll` reads it without echoing it.
+
+The `pair` command is an experimental central-initiated pairing diagnostic. It
+is not the supported Apple Watch enrollment path, and `pair --save` creates an
+`apple-continuity` enrollment rather than a generic proximity device.
 
 ```sh
-omarchy-watch-unlock enroll
-```
-
-### Pairing diagnostics
-
-`pair` is a central-initiated proof of concept. It scans, lets you select a
-device, bonds with it, and reports whether BlueZ received an IRK:
-
-```sh
-omarchy-watch-unlock devices
 omarchy-watch-unlock pair --scan-secs 20
-```
-
-Apple Watch bonding to a Linux central is unproven. Use the tested
-`apple-watch` enrollment provider above for Watch enrollment; do not use
-`pair --save` for an ordinary BLE device because that option creates an
-`apple-continuity` enrollment.
-
-`bond-info` dumps BlueZ's on-disk records and reports whether each existing bond
-contains an `IdentityResolvingKey`:
-
-```sh
 omarchy-watch-unlock bond-info
 omarchy-watch-unlock bond-info --show-keys
 ```
 
-Key material is redacted unless `--show-keys` is explicitly supplied.
+`bond-info` redacts key material unless `--show-keys` is explicitly supplied.
 
 ## Troubleshooting
 
-- `DENY no-device` with `rssi=-` means no advertisement has matched the
-  enrolled identity since the daemon started. Wake the Watch and keep it nearby.
-  A locked Watch or one with Apple Auto Unlock disabled also revokes its current
-  authorization.
-- `DENY not-locked` from `confirm` means the lock backend reports that the
-  screen is already unlocked.
-- If the PC is absent from **Health Devices**, forget any stale entry for the
-  same PC on the Watch and retry enrollment.
-- A final `org.bluez.Error.Busy` pairability warning can occur while BlueZ
-  settles after disconnect. Check `bluetoothctl show`; no action is needed when
-  `Pairable: no`.
-- Inspect daemon failures with:
+- Run `omarchy-watch-unlock doctor` first; it checks the configuration, daemon
+  socket, and lock-screen integration.
+- `DENY no-device` with `rssi=-` means nothing has matched since the daemon
+  started. Wake the device and bring it closer.
+- A locked Apple Watch, or one with Apple Auto Unlock disabled, revokes its
+  current authorization.
+- If the computer no longer appears under **Health Devices**, forget its stale
+  entry on the Watch and retry enrollment.
+- Check the daemon log with:
 
   ```sh
   journalctl --user -u omarchy-watch-unlockd --no-pager -n 100
   ```
 
-## Inspiration
+## Architecture
 
-- [KatelynHaworth/watch-unlock-rs](https://github.com/KatelynHaworth/watch-unlock-rs)
-  demonstrated a Rust PAM/CLI design using an IRK, RSSI, and Apple Continuity
-  Nearby Info to authenticate an Apple Watch.
-- [DavidSt49/watch-unlock-linux](https://github.com/DavidSt49/watch-unlock-linux)
-  provided a clear reference for BLE scanning, RPA resolution, Continuity state,
-  and proximity thresholds on Linux.
+```text
+BlueZ advertisements -> identity + profile -> per-device policy -> quorum
+                                                                  |
+Lock screen / CLI <------------ user control socket <-------------+
+```
+
+The workspace contains four crates: `protocol` owns identities, profiles,
+configuration, and policy; `daemon` scans through BlueZ and serves unlock
+requests; `cli` provides setup and administration; and `pam` connects the
+Quattro lock screen to the daemon.
 
 ## Development
 
@@ -334,6 +221,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+## Inspiration
+
+- [KatelynHaworth/watch-unlock-rs](https://github.com/KatelynHaworth/watch-unlock-rs)
+- [DavidSt49/watch-unlock-linux](https://github.com/DavidSt49/watch-unlock-linux)
 
 ## License
 
