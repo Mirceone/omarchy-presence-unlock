@@ -20,7 +20,7 @@ use bluer::{
     },
 };
 use futures_util::{FutureExt as _, StreamExt};
-use omarchy_watch_unlock_protocol::{
+use omarchy_presence_unlock_protocol::{
     ble::parse_address,
     irk::{BluezIrkError, IrkMatcher, parse_bluez_info_irk},
     paths,
@@ -571,7 +571,7 @@ async fn extract_and_report(
             freshness_ms: None,
         },
     )?;
-    println!("enrolled {id}; restart omarchy-watch-unlockd");
+    println!("enrolled {id}; restart omarchy-presence-unlockd");
     Ok(())
 }
 
@@ -681,7 +681,7 @@ fn capture_application() -> Application {
                 primary: true,
                 characteristics: vec![
                     encrypted_read(MANUFACTURER_NAME, b"Omarchy"),
-                    encrypted_read(MODEL_NUMBER, b"Watch Unlock"),
+                    encrypted_read(MODEL_NUMBER, b"Presence Unlock"),
                 ],
                 ..Default::default()
             },
@@ -1147,7 +1147,7 @@ pub fn bond_info(adapter_name: Option<&str>, show_keys: bool) -> Result<(), Stri
                     println!("  => IRK distributed: this device can be enrolled for presence unlock.");
                     if show_keys {
                         println!(
-                            "     omarchy-watch-unlock add-device watch --profile apple-continuity --irk {}",
+                            "     omarchy-presence-unlock add-device watch --profile apple-continuity --irk {}",
                             STANDARD.encode(irk)
                         );
                     } else {

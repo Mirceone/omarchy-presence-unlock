@@ -28,7 +28,7 @@ mod tests {
 
     #[test]
     fn replaces_content_and_applies_the_mode() {
-        let dir = env::temp_dir().join(format!("owu-atomic-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("opu-atomic-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("config.toml");
         fs::write(&target, "original\n").unwrap();
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn creates_a_file_that_does_not_exist_yet() {
-        let dir = env::temp_dir().join(format!("owu-atomic-new-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("opu-atomic-new-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("bindings.lua");
 

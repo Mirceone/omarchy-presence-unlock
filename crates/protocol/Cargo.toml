@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-watch-unlock-protocol"
+name = "omarchy-presence-unlock-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

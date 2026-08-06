@@ -1,3 +1,3 @@
 # This service is exclusively invoked by the local Omarchy Quattro lock plugin.
-auth    required    pam_omarchy_watch_unlock.so
+auth    required    pam_omarchy_presence_unlock.so
 account include     system-local-login

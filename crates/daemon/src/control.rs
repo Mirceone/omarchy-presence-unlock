@@ -5,7 +5,7 @@ use crate::{
     unlock::{UnlockError, Unlocker},
 };
 use nix::unistd::Uid;
-use omarchy_watch_unlock_protocol::{Decision, Fleet, wire};
+use omarchy_presence_unlock_protocol::{Decision, Fleet, wire};
 use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -151,7 +151,7 @@ async fn confirm(service: &Service) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omarchy_watch_unlock_protocol::{
+    use omarchy_presence_unlock_protocol::{
         Advertisement, DeviceSpec, Identity, Policy, Quorum, profile::PRESENCE,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

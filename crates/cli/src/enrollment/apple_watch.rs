@@ -1,5 +1,5 @@
 use super::{Guide, Provider, Request};
-use omarchy_watch_unlock_protocol::profile::APPLE_CONTINUITY;
+use omarchy_presence_unlock_protocol::profile::APPLE_CONTINUITY;
 
 /// What to tap on the Watch. `{name}` is the name this computer advertises
 /// under, which is the only part the user has to recognise.

@@ -1,6 +1,6 @@
 //! Control-socket client. The CLI never reads presence state itself.
 
-use omarchy_watch_unlock_protocol::{paths::current_socket_path, wire};
+use omarchy_presence_unlock_protocol::{paths::current_socket_path, wire};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -9,7 +9,7 @@ use std::{
 
 fn connect(timeout: Duration) -> Result<UnixStream, String> {
     let stream = UnixStream::connect(current_socket_path()).map_err(|error| {
-        format!("cannot reach the daemon socket ({error}); is omarchy-watch-unlockd running?")
+        format!("cannot reach the daemon socket ({error}); is omarchy-presence-unlockd running?")
     })?;
     stream
         .set_read_timeout(Some(timeout))

@@ -2,14 +2,14 @@
 //!
 //! Presence policy decides *whether* to unlock; an [`Unlocker`] knows *how*.
 //! Adding support for another lock screen means adding an implementation here
-//! and a name in [`omarchy_watch_unlock_protocol::config`]; nothing in the scan
+//! and a name in [`omarchy_presence_unlock_protocol::config`]; nothing in the scan
 //! or policy path changes.
 
 use nix::{
     sys::signal::{Signal, kill},
     unistd::{Pid, Uid},
 };
-use omarchy_watch_unlock_protocol::config::{Backend, SignalKind};
+use omarchy_presence_unlock_protocol::config::{Backend, SignalKind};
 use std::{fs, os::unix::fs::MetadataExt, process::Command, sync::Arc};
 use thiserror::Error;
 

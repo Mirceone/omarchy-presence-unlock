@@ -8,14 +8,14 @@ cd "$PROJECT_DIR"
 
 cargo build --release --workspace --locked
 
-sudo install -Dm755 target/release/omarchy-watch-unlock /usr/bin/omarchy-watch-unlock
-sudo install -Dm755 target/release/omarchy-watch-unlockd /usr/bin/omarchy-watch-unlockd
-sudo install -Dm755 target/release/libpam_omarchy_watch_unlock.so /usr/lib/security/pam_omarchy_watch_unlock.so
-sudo install -Dm644 packaging/omarchy-watch-unlockd.service /usr/lib/systemd/user/omarchy-watch-unlockd.service
-sudo install -Dm644 packaging/omarchy-lock-watch.pam /usr/share/omarchy-watch-unlock/omarchy-lock-watch.pam
+sudo install -Dm755 target/release/omarchy-presence-unlock /usr/bin/omarchy-presence-unlock
+sudo install -Dm755 target/release/omarchy-presence-unlockd /usr/bin/omarchy-presence-unlockd
+sudo install -Dm755 target/release/libpam_omarchy_presence_unlock.so /usr/lib/security/pam_omarchy_presence_unlock.so
+sudo install -Dm644 packaging/omarchy-presence-unlockd.service /usr/lib/systemd/user/omarchy-presence-unlockd.service
+sudo install -Dm644 packaging/omarchy-lock-presence.pam /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
 
 systemctl --user daemon-reload
-systemctl --user enable --now omarchy-watch-unlockd.service
-systemctl --user restart omarchy-watch-unlockd.service
+systemctl --user enable --now omarchy-presence-unlockd.service
+systemctl --user restart omarchy-presence-unlockd.service
 
-echo "Installed current checkout and restarted omarchy-watch-unlockd."
+echo "Installed current checkout and restarted omarchy-presence-unlockd."

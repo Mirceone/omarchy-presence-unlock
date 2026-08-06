@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Shown on the screens that are the wizard itself rather than one flow.
-pub const APP_TITLE: &str = "Omarchy Watch Unlock";
+pub const APP_TITLE: &str = "Omarchy Presence Unlock";
 
 const HOME: &str = "\x1b[H";
 const CLEAR_LINE: &str = "\x1b[K";

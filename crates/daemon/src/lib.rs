@@ -19,5 +19,5 @@ pub use control::{Service, serve};
 pub use scan::{ScanError, scan};
 pub use unlock::{UnlockError, Unlocker};
 
-pub use omarchy_watch_unlock_protocol::config::{Backend, ConfigError, ConfigFile, Settings};
-pub use omarchy_watch_unlock_protocol::{Fleet, Quorum};
+pub use omarchy_presence_unlock_protocol::config::{Backend, ConfigError, ConfigFile, Settings};
+pub use omarchy_presence_unlock_protocol::{Fleet, Quorum};

@@ -7,7 +7,7 @@
 mod apple_watch;
 pub(crate) mod mgmt;
 
-use omarchy_watch_unlock_protocol::Profile;
+use omarchy_presence_unlock_protocol::Profile;
 
 /// How far an enrollment has got, reported as it happens.
 ///
@@ -204,7 +204,7 @@ pub fn enroll(provider: &str, request: &Request<'_>) -> Result<(), String> {
 }
 
 pub fn print_catalog() {
-    for profile in omarchy_watch_unlock_protocol::profile::PROFILES {
+    for profile in omarchy_presence_unlock_protocol::profile::PROFILES {
         println!("{} — {}", profile.id(), profile.label());
         println!(
             "  {}",
@@ -244,7 +244,7 @@ mod tests {
                     .all(|other| other.id() != provider.id())
             );
             assert!(
-                omarchy_watch_unlock_protocol::profile::find(provider.profile().id()).is_some()
+                omarchy_presence_unlock_protocol::profile::find(provider.profile().id()).is_some()
             );
             assert!(!provider.description().is_empty());
         }

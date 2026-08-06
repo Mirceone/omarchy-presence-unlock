@@ -858,7 +858,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "omarchy-watch-unlock"
+name = "omarchy-presence-unlock"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -868,7 +868,7 @@ dependencies = [
  "console",
  "futures-util",
  "nix",
- "omarchy-watch-unlock-protocol",
+ "omarchy-presence-unlock-protocol",
  "rpassword",
  "shell-words",
  "tokio",
@@ -877,7 +877,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "omarchy-watch-unlock-protocol"
+name = "omarchy-presence-unlock-protocol"
 version = "0.1.0"
 dependencies = [
  "aes",
@@ -890,13 +890,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "omarchy-watch-unlockd"
+name = "omarchy-presence-unlockd"
 version = "0.1.0"
 dependencies = [
  "bluer",
  "futures-util",
  "nix",
- "omarchy-watch-unlock-protocol",
+ "omarchy-presence-unlock-protocol",
  "thiserror 2.0.19",
  "tokio",
 ]
@@ -947,11 +947,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "pam_omarchy_watch_unlock"
+name = "pam_omarchy_presence_unlock"
 version = "0.1.0"
 dependencies = [
  "nix",
- "omarchy-watch-unlock-protocol",
+ "omarchy-presence-unlock-protocol",
  "pam",
 ]
 
