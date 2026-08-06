@@ -11,13 +11,13 @@ workspace = true
 base64.workspace = true
 btmgmt.workspace = true
 console.workspace = true
-dialoguer.workspace = true
 futures-util.workspace = true
 bluer.workspace = true
 clap.workspace = true
 nix.workspace = true
 omarchy-watch-unlock-protocol = { path = "../protocol" }
 rpassword.workspace = true
+shell-words.workspace = true
 tokio.workspace = true
 toml_edit.workspace = true
 uuid.workspace = true

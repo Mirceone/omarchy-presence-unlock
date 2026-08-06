@@ -67,10 +67,28 @@ omarchy-watch-unlock init
 ```
 
 Run this in a terminal (bare `omarchy-watch-unlock`, with no arguments, does
-the same when it detects one) for a prompted walk through enrollment, backend
-selection, and lock-screen integration — the same steps as the manual quick
-start below, without needing to remember the command order. Re-running it is
-safe: it does not undo an already-enrolled device or a chosen backend.
+the same when it detects one) for a full-screen walk through enrollment,
+backend selection, and lock-screen integration — the same steps as the manual
+quick start below, without needing to remember the command order. Re-running
+it is safe: it does not undo an already-enrolled device or a chosen backend.
+
+Enrolling an Apple Watch is a three-step flow: instructions, a live pairing
+checklist that closes itself on success, timeout, or error, and a summary of
+what was enrolled. Enrolling anything else is a scan and a device picker, and
+the menu says so — that route records an address for proximity detection and
+does not pair or read a device's own lock state.
+
+Keys are the same on every screen:
+
+| Key | Meaning |
+| --- | --- |
+| `Enter` | select or continue |
+| `Esc` | cancel or back out of the current screen |
+| `Ctrl+C` | leave the wizard |
+
+Cancelling a pairing stops it, undoes the temporary Bluetooth state, restarts
+the unlock service, and says which of those succeeded. `Ctrl+C` is never
+needed to dismiss a screen that has finished.
 
 ## Apple Watch manual quick start
 
@@ -89,8 +107,10 @@ systemctl --user start omarchy-watch-unlockd
 
 The command starts a private `sudo` helper; do not run the whole CLI as root.
 When prompted, open **Settings > Bluetooth > Health Devices** on the Watch,
-select the PC's Bluetooth name, and accept pairing. A successful enrollment
-prints `IRK obtained and verified` before saving the `apple-continuity` profile.
+select the PC's Bluetooth name, and accept pairing. It reports each stage as
+it happens — adapter, monitor, advertising, connection, pairing, identity —
+and a successful run ends with `Device identity verified` followed by
+`enrolled watch; restart omarchy-watch-unlockd`.
 
 Install the integration appropriate for the current Omarchy build, restart the
 daemon after the configuration edit, and verify the complete installation:

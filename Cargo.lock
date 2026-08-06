@@ -508,16 +508,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialoguer"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25f104b501bf2364e78d0d3974cbc774f738f5865306ed128e1e0d7499c0ad96"
-dependencies = [
- "console",
- "shell-words",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -876,11 +866,11 @@ dependencies = [
  "btmgmt",
  "clap",
  "console",
- "dialoguer",
  "futures-util",
  "nix",
  "omarchy-watch-unlock-protocol",
  "rpassword",
+ "shell-words",
  "tokio",
  "toml_edit",
  "uuid 1.24.0",

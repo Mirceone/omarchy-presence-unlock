@@ -3,9 +3,11 @@ mod client;
 mod devices;
 mod doctor;
 mod enrollment;
+mod interrupt;
 mod keys;
 mod pairing;
 mod setup;
+mod ui;
 mod wizard;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -156,6 +158,56 @@ enum Commands {
     Init,
 }
 
+/// Prints what an enrollment reports as it happens.
+///
+/// Enrollments never print for themselves — the interactive menu repaints a
+/// live checklist from the same events — so this is what makes the
+/// non-interactive command say anything at all while it waits.
+fn report_progress(progress: enrollment::Progress) {
+    match progress {
+        enrollment::Progress::Phase(phase) => println!("{}", phase.describe()),
+        enrollment::Progress::Cleanup(cleanup) if cleanup.ok => {
+            println!("{}", cleanup.label);
+        }
+        enrollment::Progress::Cleanup(cleanup) => {
+            eprintln!("warning: could not complete cleanup: {}", cleanup.label);
+        }
+    }
+}
+
+/// Runs one guided enrollment non-interactively.
+///
+/// No key reader here, so Ctrl+C is the only way out and quitting and
+/// cancelling are the same thing: the flag unwinds enrollment so the adapter
+/// stops being pairable, and a second Ctrl+C gives up on that and exits.
+fn enroll_device(
+    provider: &str,
+    adapter: Option<&str>,
+    timeout_secs: u64,
+    id: &str,
+    save: bool,
+) -> Result<(), String> {
+    interrupt::install(|| {});
+    println!("Press Ctrl+C to stop waiting.");
+    enrollment::enroll(
+        provider,
+        &enrollment::Request {
+            adapter,
+            timeout_secs,
+            id,
+            save,
+            cancel: &interrupt::QUIT_REQUESTED,
+            progress: &report_progress,
+        },
+    )?;
+    if save {
+        println!("enrolled {id}; restart omarchy-watch-unlockd");
+    } else {
+        println!("identity obtained and verified; re-run with --save to enroll it");
+    }
+    Ok(())
+}
+
 fn enroll(id: &str) -> Result<(), String> {
     let irk = rpassword::prompt_password("Paste the macOS Remote IRK (base64): ")
         .map_err(|error| error.to_string())?;
@@ -255,21 +307,7 @@ fn main() {
             timeout_secs,
             id,
             save,
-        }) => {
-            // The non-interactive CLI has no key reader to request a cancel;
-            // Ctrl+C ends the process instead.
-            let never = std::sync::atomic::AtomicBool::new(false);
-            enrollment::enroll(
-                &provider,
-                &enrollment::Request {
-                    adapter: adapter.as_deref(),
-                    timeout_secs,
-                    id: &id,
-                    save,
-                    cancel: &never,
-                },
-            )
-        }
+        }) => enroll_device(&provider, adapter.as_deref(), timeout_secs, &id, save),
         Some(Commands::Profiles) => {
             enrollment::print_catalog();
             Ok(())
@@ -287,5 +325,10 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+    // The menu returns normally when Ctrl+C asked it to leave, so that its
+    // destructors run; the conventional status is applied here instead.
+    if interrupt::quit_requested() {
+        std::process::exit(130);
     }
 }

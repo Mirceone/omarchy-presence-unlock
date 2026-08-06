@@ -21,12 +21,12 @@ btmgmt = "0.2.5"
 bluer = { version = "0.17", features = ["bluetoothd"] }
 clap = { version = "4.5", features = ["derive"] }
 console = "0.16"
-dialoguer = { version = "0.12", default-features = false }
 futures-util = "0.3"
 nix = { version = "0.29", features = ["poll", "term", "time"] }
 pam = { version = "0.8", default-features = false, features = ["module"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
+shell-words = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal", "io-util", "sync", "fs", "process"] }
 toml = "0.8"

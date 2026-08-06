@@ -257,6 +257,29 @@ pub fn add(
     save(&document)
 }
 
+/// Retunes how close one enrolled device must be, leaving everything else
+/// about it alone.
+///
+/// Unlike [`add`], this is an edit rather than a replacement: the identity
+/// criteria are exactly what the device was enrolled with and must survive a
+/// sensitivity change untouched.
+///
+/// # Errors
+///
+/// Returns an error when no such device is configured, or when the result
+/// would not resolve.
+pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
+    let mut document = open()?;
+    migrate(&mut document)?;
+    let devices = device_array(&mut document)?;
+    let table = devices
+        .iter_mut()
+        .find(|table| table.get("id").and_then(Item::as_str) == Some(id))
+        .ok_or_else(|| format!("no device named {id} is configured"))?;
+    table["threshold_dbm"] = value(i64::from(threshold_dbm));
+    save(&document)
+}
+
 /// Removes one device by id.
 ///
 /// # Errors

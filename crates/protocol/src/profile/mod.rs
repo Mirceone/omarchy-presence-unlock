@@ -25,6 +25,9 @@ pub enum Observation {
 #[derive(Clone, Copy)]
 pub struct Profile {
     id: &'static str,
+    /// What this family is called in front of a user. Configuration and
+    /// diagnostics use `id`; anything a person reads uses this.
+    label: &'static str,
     aliases: &'static [&'static str],
     needs: Needs,
     attests_device_state: bool,
@@ -48,6 +51,7 @@ impl Eq for Profile {}
 impl Profile {
     pub(super) const fn new(
         id: &'static str,
+        label: &'static str,
         aliases: &'static [&'static str],
         needs: Needs,
         attests_device_state: bool,
@@ -55,11 +59,18 @@ impl Profile {
     ) -> Self {
         Self {
             id,
+            label,
             aliases,
             needs,
             attests_device_state,
             evaluate,
         }
+    }
+
+    /// The name to show a user. `id` stays the machine-readable one.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        self.label
     }
 
     #[must_use]
