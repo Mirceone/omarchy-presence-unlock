@@ -10,6 +10,7 @@ else
   PROJECT_DIR=
 fi
 UNIT=presenced.service
+PATH_UNIT=presenced.path
 USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}}
 CONFIG_FILE=$USER_CONFIG_HOME/omarchy-presence-unlock/config.toml
 REPOSITORY=${OPU_REPOSITORY:-Mirceone/omarchy-presence-unlock}
@@ -53,6 +54,7 @@ cd "$PROJECT_DIR"
 required_sources=(
   Cargo.lock
   packaging/presenced.service
+  packaging/presenced.path
   packaging/omarchy-lock-presence.pam
   README.md
   LICENSE
@@ -82,6 +84,7 @@ sudo install -Dm755 target/release/omarchy-presence-unlock /usr/bin/omarchy-pres
 sudo install -Dm755 target/release/presenced /usr/bin/presenced
 sudo install -Dm755 target/release/libpam_omarchy_presence_unlock.so /usr/lib/security/pam_omarchy_presence_unlock.so
 sudo install -Dm644 packaging/presenced.service /usr/lib/systemd/user/presenced.service
+sudo install -Dm644 packaging/presenced.path /usr/lib/systemd/user/presenced.path
 sudo install -Dm644 packaging/omarchy-lock-presence.pam /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
 sudo install -Dm644 README.md /usr/share/doc/omarchy-presence-unlock/README.md
 sudo install -Dm644 LICENSE /usr/share/licenses/omarchy-presence-unlock/LICENSE
@@ -90,9 +93,9 @@ sudo install -Dm644 LICENSE /usr/share/licenses/omarchy-presence-unlock/LICENSE
 systemctl --user disable --now omarchy-presence-unlockd.service >/dev/null 2>&1 || true
 sudo rm -f /usr/bin/omarchy-presence-unlockd /usr/lib/systemd/user/omarchy-presence-unlockd.service
 
-printf 'Enabling the user service...\n'
+printf 'Enabling the user service and configuration watcher...\n'
 systemctl --user daemon-reload
-systemctl --user enable "$UNIT"
+systemctl --user enable "$UNIT" "$PATH_UNIT"
 if [[ -f $CONFIG_FILE ]]; then
   if ! systemctl --user restart "$UNIT"; then
     systemctl --user status --no-pager "$UNIT" >&2 || true
@@ -105,11 +108,11 @@ if [[ -f $CONFIG_FILE ]]; then
   SERVICE_RESULT="restarted $UNIT"
 else
   # A daemon with no enrolled devices deliberately refuses to run. Leave the
-  # enabled unit stopped instead of filling the journal with restart attempts;
-  # the wizard starts it as soon as it creates the first configuration.
+  # enabled unit stopped; the path unit starts it when configuration appears.
   systemctl --user stop "$UNIT"
-  SERVICE_RESULT="enabled $UNIT; it will start after you enroll a device"
+  SERVICE_RESULT="enabled $UNIT; it will start automatically after you enroll a device"
 fi
+systemctl --user restart "$PATH_UNIT"
 
 command -v omarchy-presence-unlock >/dev/null 2>&1 \
   || die "installation succeeded, but /usr/bin is not on PATH"

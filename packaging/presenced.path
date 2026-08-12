@@ -1,0 +1,9 @@
+[Unit]
+Description=Start presence authorization when configuration appears
+
+[Path]
+PathExists=%E/omarchy-presence-unlock/config.toml
+Unit=presenced.service
+
+[Install]
+WantedBy=default.target

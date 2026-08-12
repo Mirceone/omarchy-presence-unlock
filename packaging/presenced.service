@@ -1,6 +1,7 @@
 [Unit]
 Description=BLE device presence authorization for Omarchy
 After=bluetooth.target
+ConditionPathExists=%E/omarchy-presence-unlock/config.toml
 
 [Service]
 ExecStart=/usr/bin/presenced
