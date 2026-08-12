@@ -115,4 +115,4 @@ command -v omarchy-presence-unlock >/dev/null 2>&1 \
   || die "installation succeeded, but /usr/bin is not on PATH"
 
 printf '\nInstalled Omarchy Presence Unlock and %s.\n' "$SERVICE_RESULT"
-printf 'Run `omarchy-presence-unlock` to open the setup menu.\n'
+printf 'Run omarchy-presence-unlock to open the setup menu.\n'
