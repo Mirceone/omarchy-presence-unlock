@@ -571,7 +571,7 @@ async fn extract_and_report(
             freshness_ms: None,
         },
     )?;
-    println!("enrolled {id}; restart omarchy-presence-unlockd");
+    println!("enrolled {id}; restart presenced");
     Ok(())
 }
 

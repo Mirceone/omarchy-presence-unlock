@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const UNLOCKD: &str = "omarchy-presence-unlockd";
+const UNLOCKD: &str = "presenced";
 
 /// `DECSET`/`DECRST` 1049 — switch to and from the terminal's alternate
 /// screen buffer. Supported by every terminal this app can plausibly run
@@ -309,8 +309,10 @@ fn configured_adapter() -> Option<String> {
 ///
 /// Best-effort: a dev checkout with no installed unit must stay usable, and a
 /// restart that fails never invalidates the change already written to disk.
+/// `restart`, rather than `try-restart`, also starts the enabled service after
+/// the first device is enrolled on a fresh installation.
 fn reload_daemon() -> Result<(), String> {
-    systemctl(&["try-restart", UNLOCKD])
+    systemctl(&["restart", UNLOCKD])
         .map_err(|error| format!("config saved, but {UNLOCKD} did not restart: {error}"))
 }
 
@@ -822,7 +824,13 @@ fn run_pairing(
         },
     );
 
-    let daemon = pause.resume();
+    let mut daemon = pause.resume();
+    // A fresh install enables but does not start an unconfigured daemon. Once
+    // enrollment has written the first device, start it here; an already-active
+    // daemon was resumed by the pause guard above and needs no second restart.
+    if result.is_ok() && daemon.is_ok() && !unlockd_is_active() {
+        daemon = reload_daemon();
+    }
     // The worker is finished, so nothing else holds the lock; a poisoned lock
     // means the worker panicked, which `run_cancellable` has already turned
     // into a panic here.

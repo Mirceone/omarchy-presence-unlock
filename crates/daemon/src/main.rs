@@ -1,5 +1,5 @@
 use omarchy_presence_unlock_protocol::paths;
-use omarchy_presence_unlockd::{ConfigFile, Fleet, Service, scan, serve, unlock};
+use presenced::{ConfigFile, Fleet, Service, scan, serve, unlock};
 use std::{sync::Arc, time::Duration};
 
 #[tokio::main]

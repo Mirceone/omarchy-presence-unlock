@@ -6,7 +6,24 @@ use omarchy_presence_unlock_protocol::{
     paths::{config_path, current_socket_path},
     wire,
 };
-use std::{fs, os::unix::fs::PermissionsExt, process::Command, time::Duration};
+use std::{
+    fs,
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    path::PathBuf,
+    process::Command,
+    time::Duration,
+};
+
+const SERVICE_MARKER: &str = "// omarchy-presence-unlock:service";
+const VIEW_MARKER: &str = "// omarchy-presence-unlock:view";
+const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
+const UPDATE_HOOK: &str = ".config/omarchy/hooks/post-update.d/omarchy-presence-unlock";
+
+struct QuattroIntegration {
+    plugin_id: String,
+    service: PathBuf,
+    view: PathBuf,
+}
 
 /// # Errors
 ///
@@ -17,7 +34,7 @@ pub fn doctor() -> Result<(), String> {
     let settings = config.resolve().map_err(|error| error.to_string())?;
 
     let mode = fs::metadata(&path)
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
         .permissions()
         .mode()
         & 0o777;
@@ -28,12 +45,9 @@ pub fn doctor() -> Result<(), String> {
         ));
     }
 
+    let quattro = quattro_integration();
     match &settings.backend {
-        Backend::Disabled => {
-            return Err(
-                "unlock backend is disabled; run setup-omarchy or `backend` to pick one".into(),
-            );
-        }
+        Backend::Disabled => validate_quattro(quattro.as_ref())?,
         Backend::ProcessSignal { process, .. } => {
             if !executable(process) {
                 return Err(format!(
@@ -49,11 +63,25 @@ pub fn doctor() -> Result<(), String> {
         }
     }
 
-    if !current_socket_path().exists() {
-        return Err("daemon socket is absent; start the user service".into());
+    let socket = current_socket_path();
+    let metadata = fs::metadata(&socket).map_err(|_| {
+        format!(
+            "presenced socket is absent at {}; run `systemctl --user restart presenced` (service is {})",
+            socket.display(),
+            user_service_state()
+        )
+    })?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(format!(
+            "presenced socket at {} is not a private socket owned by uid {uid}",
+            socket.display()
+        ));
     }
-    // The socket exists, so the daemon can answer for itself: this proves the
-    // running daemon parsed the same devices, not just that the file is valid.
+
     let reported = client::request_lines(wire::REQ_STATUS, Duration::from_millis(200))?;
     let devices = reported
         .iter()
@@ -61,7 +89,7 @@ pub fn doctor() -> Result<(), String> {
         .count();
     if devices != settings.devices.len() {
         return Err(format!(
-            "config lists {} device(s) but the daemon is running {devices}; restart omarchy-presence-unlockd",
+            "config lists {} device(s) but presenced is running {devices}; restart presenced",
             settings.devices.len()
         ));
     }
@@ -73,10 +101,116 @@ pub fn doctor() -> Result<(), String> {
         settings.quorum,
         config.unlock_backend
     );
+    if let Some(integration) = quattro {
+        println!("ok: active Quattro plugin {}", integration.plugin_id);
+        println!("ok: presence PAM policy {PAM_POLICY}");
+        if let Some(hook) = update_hook_path() {
+            println!("ok: Omarchy post-update rebase hook {}", hook.display());
+        }
+    }
+    println!(
+        "ok: presenced {}, private socket {}",
+        user_service_state(),
+        socket.display()
+    );
     for device in &settings.devices {
         println!("  {} ({})", device.id, device.profile.id());
     }
     Ok(())
+}
+
+fn quattro_integration() -> Option<QuattroIntegration> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let plugin_id = "presence.lock".to_string();
+    let directory = home.join(".config/omarchy/plugins").join(&plugin_id);
+    Some(QuattroIntegration {
+        plugin_id,
+        service: directory.join("Service.qml"),
+        view: directory.join("LockView.qml"),
+    })
+}
+fn update_hook_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(UPDATE_HOOK))
+}
+
+fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), String> {
+    let integration = integration.ok_or(
+        "unlock backend is disabled and the Quattro plugin path cannot be resolved; run `omarchy-presence-unlock setup-omarchy`",
+    )?;
+    let service = fs::read_to_string(&integration.service).map_err(|_| {
+        format!(
+            "unlock backend is disabled but {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            integration.service.display()
+        )
+    })?;
+    let view = fs::read_to_string(&integration.view).map_err(|_| {
+        format!(
+            "Quattro presence view {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            integration.view.display()
+        )
+    })?;
+    if !service.contains(SERVICE_MARKER) || !view.contains(VIEW_MARKER) {
+        return Err(
+            "the active Quattro clone does not contain the current presence integration; rerun `omarchy-presence-unlock setup-omarchy`"
+                .into(),
+        );
+    }
+    if !std::path::Path::new(PAM_POLICY).is_file() {
+        return Err(format!(
+            "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup-omarchy`"
+        ));
+    }
+    let hook = update_hook_path().ok_or(
+        "HOME is required to locate the Omarchy post-update hook; rerun `omarchy-presence-unlock setup-omarchy`",
+    )?;
+    let hook_metadata = fs::metadata(&hook).map_err(|_| {
+        format!(
+            "Omarchy post-update hook is missing at {}; rerun `omarchy-presence-unlock setup-omarchy`",
+            hook.display()
+        )
+    })?;
+    if !hook_metadata.is_file() || hook_metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "Omarchy post-update hook at {} is not executable; rerun `omarchy-presence-unlock setup-omarchy`",
+            hook.display()
+        ));
+    }
+    if !plugin_is_enabled(&integration.plugin_id) {
+        return Err(format!(
+            "Quattro plugin {} is not enabled; run `omarchy plugin enable {}`",
+            integration.plugin_id, integration.plugin_id
+        ));
+    }
+    Ok(())
+}
+
+fn plugin_is_enabled(plugin_id: &str) -> bool {
+    let Ok(output) = Command::new("omarchy")
+        .args(["plugin", "list", "--json"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let needle = format!("\"id\":\"{plugin_id}\"");
+    listing
+        .find(&needle)
+        .and_then(|start| listing[start..].split_once('}').map(|(object, _)| object))
+        .is_some_and(|object| object.contains("\"enabled\":true"))
+}
+
+fn user_service_state() -> String {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "presenced.service"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".into(), |state| state.trim().to_string())
 }
 
 /// True when `program` runs. `--version` is the one flag every lock screen and
@@ -88,4 +222,21 @@ fn executable(program: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn compact_plugin_listing_detects_only_the_enabled_target() {
+        let listing =
+            r#"[{"id":"presence.lock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
+        let needle = "\"id\":\"presence.lock\"";
+        let enabled = listing
+            .find(needle)
+            .and_then(|start| listing[start..].split_once('}').map(|(object, _)| object))
+            .is_some_and(|object| object.contains("\"enabled\":true"));
+        assert!(enabled);
+        assert!(!listing.contains("\"id\":\"bob.lock\""));
+    }
 }
