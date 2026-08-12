@@ -5,6 +5,12 @@ a trusted Bluetooth device is nearby. It keeps the user's intent explicit: devic
 presence authorizes an unlock request, while the lock screen still requires a
 confirmation gesture.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
+```
+
 ## Why
 
 Passwords and fingerprints remain the right fallback, but repeatedly using them
