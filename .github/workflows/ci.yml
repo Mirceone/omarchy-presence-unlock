@@ -106,6 +106,6 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
           su builder --command 'cd "$GITHUB_WORKSPACE" && makepkg --printsrcinfo > .SRCINFO'
           test -s .SRCINFO
-          grep --fixed-strings 'pkgname = omarchy-watch-unlock' .SRCINFO
+          grep --fixed-strings 'pkgname = omarchy-presence-unlock' .SRCINFO
           grep --fixed-strings 'depends = bluez' .SRCINFO
           grep --fixed-strings 'depends = pam' .SRCINFO
