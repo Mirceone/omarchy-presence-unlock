@@ -870,6 +870,7 @@ dependencies = [
  "nix",
  "omarchy-presence-unlock-protocol",
  "rpassword",
+ "serde_json",
  "shell-words",
  "tokio",
  "toml_edit",
@@ -887,18 +888,6 @@ dependencies = [
  "thiserror 2.0.19",
  "toml",
  "uuid 1.24.0",
-]
-
-[[package]]
-name = "omarchy-presence-unlockd"
-version = "0.1.0"
-dependencies = [
- "bluer",
- "futures-util",
- "nix",
- "omarchy-presence-unlock-protocol",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
@@ -986,6 +975,18 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "presenced"
+version = "0.1.0"
+dependencies = [
+ "bluer",
+ "futures-util",
+ "nix",
+ "omarchy-presence-unlock-protocol",
+ "thiserror 2.0.19",
+ "tokio",
+]
 
 [[package]]
 name = "proc-macro2"

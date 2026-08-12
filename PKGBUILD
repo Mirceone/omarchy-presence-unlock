@@ -1,6 +1,6 @@
 pkgname=omarchy-presence-unlock
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='BLE device presence unlock for Omarchy'
 arch=('x86_64')
 url='https://github.com/mirceone/omarchy-presence-unlock'
@@ -35,9 +35,10 @@ build() {
 package() {
   cd "$srcdir/$pkgname"
   install -Dm755 target/release/omarchy-presence-unlock "$pkgdir/usr/bin/omarchy-presence-unlock"
-  install -Dm755 target/release/omarchy-presence-unlockd "$pkgdir/usr/bin/omarchy-presence-unlockd"
+  install -Dm755 target/release/presenced "$pkgdir/usr/bin/presenced"
   install -Dm755 target/release/libpam_omarchy_presence_unlock.so "$pkgdir/usr/lib/security/pam_omarchy_presence_unlock.so"
-  install -Dm644 packaging/omarchy-presence-unlockd.service "$pkgdir/usr/lib/systemd/user/omarchy-presence-unlockd.service"
+  install -Dm644 packaging/presenced.service "$pkgdir/usr/lib/systemd/user/presenced.service"
   install -Dm644 packaging/omarchy-lock-presence.pam "$pkgdir/usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -21,15 +21,26 @@ Apple Watch enrollment happens entirely on Linux; no Mac is required.
 ## Install
 
 ```sh
-git clone https://github.com/mirceone/omarchy-presence-unlock.git
+curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
+```
+
+The bootstrap downloads the current source into a temporary directory and
+builds it locally for the machine; it does not download prebuilt binaries.
+To install from a checkout instead:
+
+```sh
+git clone https://github.com/Mirceone/omarchy-presence-unlock.git
 cd omarchy-presence-unlock
 ./install.sh
 ```
 
+Run the script as your normal desktop user, without `sudo`; it requests
+administrator access only while copying files into `/usr`.
+
 The installer builds and installs the CLI, daemon, PAM module, and systemd user
-service under `/usr`. It enables the daemon but does not enroll a device or
-change your lock-screen configuration. Re-running it after source changes is
-safe.
+service under `/usr`. It enables the daemon and starts it once a device is
+configured, but does not enroll a device or change your lock-screen
+configuration. Re-running it after source changes is safe.
 
 ## Set up with the wizard
 
@@ -84,15 +95,24 @@ The wizard can install the correct lock-screen integration, or you can run:
 
 ```sh
 omarchy-presence-unlock setup-omarchy
-systemctl --user restart omarchy-presence-unlockd
+systemctl --user restart presenced
 omarchy-presence-unlock doctor
 omarchy-presence-unlock status
 ```
 
 On Hyprlock, press `Alt+Enter` while the lock screen is visible to confirm an
-unlock. Omarchy Quattro builds use the local lock plugin and its dedicated PAM
-policy instead. `status` prints each device's decision followed by the overall
-quorum result.
+unlock. Omarchy Quattro builds use the generated `presence.lock` plugin and a
+dedicated PAM policy: hold `Alt` for 400 milliseconds when the presence icon is
+visible. Releasing `Alt`, pressing another key, or losing input focus cancels
+the request. Password and fingerprint authentication remain unchanged.
+`status` prints each device's decision followed by the overall quorum result.
+
+Each `setup-omarchy` run rebuilds `presence.lock` from Omarchy's current stock
+lock plugin, validates it, and activates it transactionally. Setup also installs
+an Omarchy `post-update` hook that repeats this rebase automatically after
+future Omarchy updates. The previous generated plugin and a one-time legacy
+username-based clone are retained under
+`~/.local/state/omarchy-presence-unlock/` for rollback.
 
 ## Useful CLI commands
 
@@ -162,9 +182,9 @@ omarchy-presence-unlock profiles
 Enroll an Apple Watch without the wizard by pausing the daemon first:
 
 ```sh
-systemctl --user stop omarchy-presence-unlockd
+systemctl --user stop presenced
 omarchy-presence-unlock enroll-device --provider apple-watch --save --id watch
-systemctl --user start omarchy-presence-unlockd
+systemctl --user start presenced
 ```
 
 Use `--adapter hci1` to select a non-default adapter or `--timeout-secs` to
@@ -197,7 +217,7 @@ omarchy-presence-unlock bond-info --show-keys
 - Check the daemon log with:
 
   ```sh
-  journalctl --user -u omarchy-presence-unlockd --no-pager -n 100
+  journalctl --user -u presenced --no-pager -n 100
   ```
 
 ## Architecture
@@ -210,8 +230,8 @@ Lock screen / CLI <------------ user control socket <-------------+
 
 The workspace contains four crates: `protocol` owns identities, profiles,
 configuration, and policy; `daemon` scans through BlueZ and serves unlock
-requests; `cli` provides setup and administration; and `pam` connects the
-Quattro lock screen to the daemon.
+requests; `cli` provides setup and administration; and `pam` connects
+Quattro's generated `presence.lock` plugin to the daemon.
 
 ## Development
 

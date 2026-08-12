@@ -9,7 +9,7 @@ use std::{
 
 fn connect(timeout: Duration) -> Result<UnixStream, String> {
     let stream = UnixStream::connect(current_socket_path()).map_err(|error| {
-        format!("cannot reach the daemon socket ({error}); is omarchy-presence-unlockd running?")
+        format!("cannot reach the daemon socket ({error}); is presenced running?")
     })?;
     stream
         .set_read_timeout(Some(timeout))

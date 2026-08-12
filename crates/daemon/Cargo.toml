@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-presence-unlockd"
+name = "presenced"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -3,7 +3,7 @@ Description=BLE device presence authorization for Omarchy
 After=bluetooth.target
 
 [Service]
-ExecStart=/usr/bin/omarchy-presence-unlockd
+ExecStart=/usr/bin/presenced
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

@@ -201,7 +201,7 @@ fn enroll_device(
         },
     )?;
     if save {
-        println!("enrolled {id}; restart omarchy-presence-unlockd");
+        println!("enrolled {id}; restart presenced");
     } else {
         println!("identity obtained and verified; re-run with --save to enroll it");
     }
@@ -224,7 +224,7 @@ fn enroll(id: &str) -> Result<(), String> {
             freshness_ms: None,
         },
     )?;
-    println!("Enrolled {id}. Start with: systemctl --user enable --now omarchy-presence-unlockd");
+    println!("Enrolled {id}. Start with: systemctl --user enable --now presenced");
     Ok(())
 }
 
