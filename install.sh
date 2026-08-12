@@ -3,7 +3,12 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_SOURCE=${BASH_SOURCE[0]:-}
+if [[ -n $SCRIPT_SOURCE ]]; then
+  PROJECT_DIR=$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" && pwd)
+else
+  PROJECT_DIR=
+fi
 UNIT=presenced.service
 USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}}
 CONFIG_FILE=$USER_CONFIG_HOME/omarchy-presence-unlock/config.toml
@@ -21,7 +26,7 @@ fi
 
 # A piped installer has no checkout beside it. Download the selected source
 # revision into a temporary directory, then let that copy build normally.
-if [[ ! -f $PROJECT_DIR/Cargo.lock ]]; then
+if [[ -z $PROJECT_DIR || ! -f $PROJECT_DIR/Cargo.lock ]]; then
   for command in curl tar mktemp; do
     command -v "$command" >/dev/null 2>&1 || die "required bootstrap command not found: $command"
   done
