@@ -1,245 +1,35 @@
 # Omarchy Presence Unlock
 
-Unlock Omarchy with a nearby Bluetooth device. Apple Watch is the
-best-supported option; phones, bands, fobs, and other BLE devices can also be
-used for proximity-only authorization.
+Omarchy Presence Unlock makes unlocking an Omarchy desktop less repetitive when
+a trusted Bluetooth device is nearby. It keeps the user's intent explicit: device
+presence authorizes an unlock request, while the lock screen still requires a
+confirmation gesture.
 
-This is a convenience feature, not a replacement for your password or
-fingerprint. It does not defend against Bluetooth relay/replay attacks or a
-process that already has access to your user session. Password and fingerprint
-authentication remain available.
+## Why
 
-## Requirements
+Passwords and fingerprints remain the right fallback, but repeatedly using them
+on a personal machine can add friction. Presence authorization offers a narrower
+convenience layer without replacing the existing authentication methods or
+silently unlocking the session.
 
-- Omarchy on x86-64 Arch Linux, with BlueZ, PAM, and a systemd user session
-- a working Bluetooth LE adapter managed by `bluetoothd`
-- Rust 1.88 or newer and Cargo when installing from source
-- `sudo` access for installation and Apple Watch enrollment
+Apple Watch is the best-supported device because it can report both proximity
+and whether the Watch itself is unlocked. Phones, bands, fobs, and other BLE
+devices can provide proximity authorization, but presence alone cannot prove
+that the person carrying them is authorized.
 
-Apple Watch enrollment happens entirely on Linux; no Mac is required.
+## Security tradeoff
 
-## Install
+This project favors convenience, not stronger authentication. It does not defend
+against Bluetooth relay or replay attacks, compromised Bluetooth devices, or a
+process that already controls the user's session. Anyone adopting it should keep
+password or fingerprint authentication enabled and decide whether Bluetooth
+presence is appropriate for their threat model.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
-```
+## Documentation policy
 
-The bootstrap downloads the current source into a temporary directory and
-builds it locally for the machine; it does not download prebuilt binaries.
-To install from a checkout instead:
-
-```sh
-git clone https://github.com/Mirceone/omarchy-presence-unlock.git
-cd omarchy-presence-unlock
-./install.sh
-```
-
-Run the script as your normal desktop user, without `sudo`; it requests
-administrator access only while copying files into `/usr`.
-
-The installer builds and installs the CLI, daemon, PAM module, and systemd user
-service under `/usr`. It enables the daemon and starts it once a device is
-configured, but does not enroll a device or change your lock-screen
-configuration. Re-running it after source changes is safe.
-
-## Set up with the wizard
-
-```sh
-omarchy-presence-unlock init
-```
-
-Running `omarchy-presence-unlock` without a subcommand opens the same full-screen
-wizard in a terminal. It handles enrollment, enrolled-device management,
-unlock settings, lock-screen integration, diagnostics, and live status.
-
-The controls are consistent throughout the wizard:
-
-| Key | Action |
-| --- | --- |
-| `Enter` | Select or continue |
-| `Esc` | Cancel the current operation or go back |
-| `Ctrl+C` | Leave the wizard |
-
-Pairing waits end on success, timeout, error, or `Esc`, then show a result
-screen with the next available actions. You do not need `Ctrl+C` to dismiss a
-completed operation.
-
-### Apple Watch
-
-Choose **Apple Watch** in the enrollment menu and follow the checklist. When
-prompted, open **Settings > Bluetooth > Health Devices** on the Watch, select
-the computer's Bluetooth name, and accept pairing.
-
-The wizard temporarily pauses the unlock daemon, advertises the computer as a
-Heart Rate Sensor, captures and verifies the Watch identity, then attempts to
-clean up the temporary Bluetooth state and restart the daemon. Any cleanup
-failure is shown in the result. A narrowly scoped `sudo` helper reads the
-kernel IRK event; do not run the whole CLI as root.
-
-Apple Watch is the only built-in profile that also reports whether the device
-itself is locked. A locked Watch, or one with Apple Auto Unlock disabled, does
-not authorize an unlock.
-
-### Other Bluetooth devices
-
-Choose **Other Bluetooth device** to scan and select a nearby advertiser. This
-does not pair with the device: it saves its address for proximity detection.
-
-These devices are **proximity only**. Their presence can authorize an unlock,
-but they cannot prove that they are unlocked. Devices that rotate private
-addresses cannot be tracked reliably by address and need an IRK instead.
-
-## Finish and verify setup
-
-The wizard can install the correct lock-screen integration, or you can run:
-
-```sh
-omarchy-presence-unlock setup-omarchy
-systemctl --user restart presenced
-omarchy-presence-unlock doctor
-omarchy-presence-unlock status
-```
-
-On Hyprlock, press `Alt+Enter` while the lock screen is visible to confirm an
-unlock. Omarchy Quattro builds use the generated `presence.lock` plugin and a
-dedicated PAM policy: hold `Alt` for 400 milliseconds when the presence icon is
-visible. Releasing `Alt`, pressing another key, or losing input focus cancels
-the request. Password and fingerprint authentication remain unchanged.
-`status` prints each device's decision followed by the overall quorum result.
-
-Each `setup-omarchy` run rebuilds `presence.lock` from Omarchy's current stock
-lock plugin, validates it, and activates it transactionally. Setup also installs
-an Omarchy `post-update` hook that repeats this rebase automatically after
-future Omarchy updates. The previous generated plugin and a one-time legacy
-username-based clone are retained under
-`~/.local/state/omarchy-presence-unlock/` for rollback.
-
-## Useful CLI commands
-
-Scan and enroll proximity devices manually:
-
-```sh
-omarchy-presence-unlock devices
-omarchy-presence-unlock add-device phone --address AA:BB:CC:DD:EE:FF
-```
-
-Identity criteria combine with AND. At least one of `--address`, `--irk`,
-`--service-uuid`, or `--name-prefix` is required. Per-device policy can be
-tuned when adding a device:
-
-```sh
-omarchy-presence-unlock add-device fob --address AA:BB:CC:DD:EE:FF \
-  --threshold-dbm -60 --minimum-samples 3 --freshness-ms 2000
-```
-
-Choose how many enrolled devices must be present:
-
-```sh
-omarchy-presence-unlock quorum any
-omarchy-presence-unlock quorum all
-omarchy-presence-unlock quorum at-least:2
-```
-
-Choose how an authorized request releases the lock screen:
-
-```sh
-omarchy-presence-unlock backend hyprlock-confirm
-omarchy-presence-unlock backend process-signal --process swaylock --signal SIGUSR1
-omarchy-presence-unlock backend command -- loginctl unlock-session
-omarchy-presence-unlock backend disabled
-```
-
-Run `omarchy-presence-unlock --help` or a subcommand with `--help` for the complete
-CLI reference.
-
-## Configuration
-
-Configuration is stored at
-`~/.config/omarchy-presence-unlock/config.toml` with mode `0600`. Older schema 1
-and 2 files remain readable and are migrated to schema 3 by the next CLI edit.
-
-```toml
-schema_version = 3
-quorum = "any"
-unlock_backend = "hyprlock-confirm"
-# adapter = "hci1"
-
-[[device]]
-id = "phone"
-profile = "presence"
-address = "AA:BB:CC:DD:EE:FF"
-minimum_samples = 3
-```
-
-List the profiles and enrollment providers compiled into the installed build:
-
-```sh
-omarchy-presence-unlock profiles
-```
-
-## Advanced usage
-
-Enroll an Apple Watch without the wizard by pausing the daemon first:
-
-```sh
-systemctl --user stop presenced
-omarchy-presence-unlock enroll-device --provider apple-watch --save --id watch
-systemctl --user start presenced
-```
-
-Use `--adapter hci1` to select a non-default adapter or `--timeout-secs` to
-change the default five-minute wait. Without `--save`, enrollment verifies the
-identity without changing the configuration. If you already have a macOS
-Remote IRK, `omarchy-presence-unlock enroll` reads it without echoing it.
-
-The `pair` command is an experimental central-initiated pairing diagnostic. It
-is not the supported Apple Watch enrollment path, and `pair --save` creates an
-`apple-continuity` enrollment rather than a generic proximity device.
-
-```sh
-omarchy-presence-unlock pair --scan-secs 20
-omarchy-presence-unlock bond-info
-omarchy-presence-unlock bond-info --show-keys
-```
-
-`bond-info` redacts key material unless `--show-keys` is explicitly supplied.
-
-## Troubleshooting
-
-- Run `omarchy-presence-unlock doctor` first; it checks the configuration, daemon
-  socket, and lock-screen integration.
-- `DENY no-device` with `rssi=-` means nothing has matched since the daemon
-  started. Wake the device and bring it closer.
-- A locked Apple Watch, or one with Apple Auto Unlock disabled, revokes its
-  current authorization.
-- If the computer no longer appears under **Health Devices**, forget its stale
-  entry on the Watch and retry enrollment.
-- Check the daemon log with:
-
-  ```sh
-  journalctl --user -u presenced --no-pager -n 100
-  ```
-
-## Architecture
-
-```text
-BlueZ advertisements -> identity + profile -> per-device policy -> quorum
-                                                                  |
-Lock screen / CLI <------------ user control socket <-------------+
-```
-
-The workspace contains four crates: `protocol` owns identities, profiles,
-configuration, and policy; `daemon` scans through BlueZ and serves unlock
-requests; `cli` provides setup and administration; and `pam` connects
-Quattro's generated `presence.lock` plugin to the daemon.
-
-## Development
-
-```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-```
+The code, command help, and observable behavior are the source of truth. This
+README intentionally explains the project's purpose and tradeoffs rather than
+duplicating operational details that can become stale.
 
 ## Inspiration
 
