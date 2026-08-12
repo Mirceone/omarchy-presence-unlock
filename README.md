@@ -21,7 +21,15 @@ Apple Watch enrollment happens entirely on Linux; no Mac is required.
 ## Install
 
 ```sh
-git clone https://github.com/mirceone/omarchy-presence-unlock.git
+curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
+```
+
+The bootstrap downloads the current source into a temporary directory and
+builds it locally for the machine; it does not download prebuilt binaries.
+To install from a checkout instead:
+
+```sh
+git clone https://github.com/Mirceone/omarchy-presence-unlock.git
 cd omarchy-presence-unlock
 ./install.sh
 ```

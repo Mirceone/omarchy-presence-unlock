@@ -7,6 +7,8 @@ PROJECT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UNIT=presenced.service
 USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}}
 CONFIG_FILE=$USER_CONFIG_HOME/omarchy-presence-unlock/config.toml
+REPOSITORY=${OPU_REPOSITORY:-Mirceone/omarchy-presence-unlock}
+REF=${OPU_REF:-main}
 
 die() {
   printf 'install: %s\n' "$*" >&2
@@ -15,6 +17,23 @@ die() {
 
 if (( EUID == 0 )); then
   die "run this script as your normal desktop user, not with sudo; it will request sudo only when installing files"
+fi
+
+# A piped installer has no checkout beside it. Download the selected source
+# revision into a temporary directory, then let that copy build normally.
+if [[ ! -f $PROJECT_DIR/Cargo.lock ]]; then
+  for command in curl tar mktemp; do
+    command -v "$command" >/dev/null 2>&1 || die "required bootstrap command not found: $command"
+  done
+
+  BOOTSTRAP_DIR=$(mktemp -d)
+  trap 'rm -rf "$BOOTSTRAP_DIR"' EXIT
+  printf 'Downloading %s at %s...\n' "$REPOSITORY" "$REF"
+  curl -fsSL --retry 3 \
+    "https://codeload.github.com/$REPOSITORY/tar.gz/$REF" \
+    | tar -xz --strip-components=1 -C "$BOOTSTRAP_DIR"
+  bash "$BOOTSTRAP_DIR/install.sh"
+  exit
 fi
 
 for command in cargo install sudo systemctl; do
