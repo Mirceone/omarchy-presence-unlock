@@ -40,11 +40,11 @@ pub trait Unlocker: Send + Sync + 'static {
     fn unlock(&self) -> Result<(), UnlockError>;
 }
 
-/// Builds the configured backend, or `None` when unlocking is disabled.
+/// Builds the configured backend, or `None` when Quattro or no backend owns unlocking.
 #[must_use]
 pub fn build(backend: &Backend) -> Option<Arc<dyn Unlocker>> {
     match backend {
-        Backend::Disabled => None,
+        Backend::Quattro | Backend::Disabled => None,
         Backend::ProcessSignal { process, signal } => Some(Arc::new(ProcessSignal {
             process: process.clone(),
             signal: match signal {

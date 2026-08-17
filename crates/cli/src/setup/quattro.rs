@@ -553,7 +553,7 @@ pub fn setup() -> Result<(), String> {
             "could not install Omarchy post-update hook: {error}"
         ));
     }
-    if let Err(error) = devices::set_backend("disabled", None, None, &[]) {
+    if let Err(error) = devices::set_backend("quattro", None, None, &[]) {
         let _ = fs::remove_dir_all(&stage);
         return Err(error);
     }

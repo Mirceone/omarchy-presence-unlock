@@ -47,7 +47,8 @@ pub fn doctor() -> Result<(), String> {
 
     let quattro = quattro_integration();
     match &settings.backend {
-        Backend::Disabled => validate_quattro(quattro.as_ref())?,
+        Backend::Quattro => validate_quattro(quattro.as_ref())?,
+        Backend::Disabled => {}
         Backend::ProcessSignal { process, .. } => {
             if !executable(process) {
                 return Err(format!(

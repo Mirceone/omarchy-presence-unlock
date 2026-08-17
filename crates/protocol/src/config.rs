@@ -118,13 +118,14 @@ pub enum SignalKind {
     Usr2,
 }
 
-/// What releases the lock screen once a confirmation is authorised.
+/// What handles the confirmed unlock request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
+    /// Quattro's PAM plugin owns the unlock request.
+    Quattro,
     /// Nothing is wired up; `CONFIRM` is refused.
     Disabled,
     /// Signal a process owned by this user, matched by `/proc/<pid>/comm`.
-    /// Hyprlock's supported unlock path is `SIGUSR1`.
     ProcessSignal { process: String, signal: SignalKind },
     /// Run a command; a zero exit status means the session was unlocked.
     /// Covers `loginctl unlock-session`, swaylock forks, and anything scriptable.
@@ -282,13 +283,8 @@ impl ConfigFile {
     /// backend whose required parameters are missing.
     pub fn backend(&self) -> Result<Backend, ConfigError> {
         match self.unlock_backend.as_str() {
+            "quattro" | "hyprlock-confirm" | "hyprlock-signal" => Ok(Backend::Quattro),
             "disabled" => Ok(Backend::Disabled),
-            // v0.1's automatic mode is deliberately migrated to confirmation:
-            // old configuration must never preserve automatic unlock by accident.
-            "hyprlock-confirm" | "hyprlock-signal" => Ok(Backend::ProcessSignal {
-                process: "hyprlock".into(),
-                signal: SignalKind::Usr1,
-            }),
             "process-signal" => Ok(Backend::ProcessSignal {
                 process: self.unlock_process.clone().ok_or_else(|| {
                     ConfigError::Backend("process-signal needs unlock_process".into())
@@ -484,15 +480,11 @@ address = "AA:BB:CC:DD:EE:FF"
     }
 
     #[test]
-    fn the_legacy_automatic_backend_maps_to_confirmation() {
-        let signal = Backend::ProcessSignal {
-            process: "hyprlock".into(),
-            signal: SignalKind::Usr1,
-        };
+    fn legacy_hyprlock_backends_map_to_quattro() {
         let mut config = ConfigFile::parse(&v2()).unwrap();
-        assert_eq!(config.backend().unwrap(), signal);
+        assert_eq!(config.backend().unwrap(), Backend::Quattro);
         config.unlock_backend = "hyprlock-signal".into();
-        assert_eq!(config.backend().unwrap(), signal);
+        assert_eq!(config.backend().unwrap(), Backend::Quattro);
         config.unlock_backend = "disabled".into();
         assert_eq!(config.backend().unwrap(), Backend::Disabled);
         config.unlock_backend = "hyprlock-comfirm".into();

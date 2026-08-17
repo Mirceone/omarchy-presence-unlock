@@ -69,7 +69,7 @@ enum Commands {
     Quorum { expression: String },
     /// Choose what releases the lock screen.
     Backend {
-        /// disabled, hyprlock-confirm, process-signal, or command.
+        /// quattro, disabled, process-signal, or command.
         name: String,
         /// Process name for process-signal, matched against /proc/<pid>/comm.
         #[arg(long)]

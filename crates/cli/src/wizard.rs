@@ -256,13 +256,10 @@ fn enrolled_devices() -> Vec<(String, &'static str)> {
         .unwrap_or_default()
 }
 
-/// Which unlock-backend option the config currently holds, read from the raw
-/// `config.toml` string rather than the resolved `Settings`:
-/// `hyprlock-confirm` resolves into the same process-signal backend the
-/// manual option produces, so only the unresolved name tells them apart.
+/// Which unlock-backend option the config currently holds.
 fn current_backend() -> Option<usize> {
     match ConfigFile::load().ok()?.unlock_backend.as_str() {
-        "hyprlock-confirm" => Some(0),
+        "quattro" | "hyprlock-confirm" | "hyprlock-signal" => Some(0),
         "process-signal" => Some(1),
         "command" => Some(2),
         "disabled" => Some(3),
@@ -1442,7 +1439,7 @@ fn choose_backend(screen: &Screen) -> Action {
             return Ok(false);
         }
         match choice {
-            0 => devices::set_backend("hyprlock-confirm", None, None, &[])?,
+            0 => devices::set_backend("quattro", None, None, &[])?,
             1 => {
                 let Some(process) = ui::input(
                     screen,

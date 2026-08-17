@@ -132,6 +132,12 @@ fn migrate(document: &mut DocumentMut) -> Result<(), String> {
             }
         }
     }
+    if matches!(
+        document.get("unlock_backend").and_then(Item::as_str),
+        Some("hyprlock-confirm" | "hyprlock-signal")
+    ) {
+        document["unlock_backend"] = value("quattro");
+    }
     document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
     Ok(())
 }
@@ -325,12 +331,9 @@ fn apply_backend(
     command: &[String],
 ) -> Result<(), String> {
     // Validate before mutating so a rejected switch leaves the document untouched.
-    if !matches!(
-        name,
-        "disabled" | "hyprlock-confirm" | "command" | "process-signal"
-    ) {
+    if !matches!(name, "quattro" | "disabled" | "command" | "process-signal") {
         return Err(format!(
-            "unknown backend {name}; use disabled, hyprlock-confirm, process-signal, or command"
+            "unknown backend {name}; use quattro, disabled, process-signal, or command"
         ));
     }
     if name == "command" && command.is_empty() {
@@ -414,8 +417,8 @@ mod tests {
         assert!(text.contains("id = \"watch\""));
         assert!(text.contains("profile = \"apple-continuity\""));
         assert!(text.contains("threshold_dbm = -55"));
-        // Unrelated keys are preserved.
-        assert!(text.contains("unlock_backend = \"hyprlock-confirm\""));
+        // Legacy backends migrate to Quattro while unrelated settings survive.
+        assert!(text.contains("unlock_backend = \"quattro\""));
     }
 
     #[test]
@@ -553,9 +556,9 @@ mod tests {
         let mut doc = document(
             "schema_version = 3\nunlock_backend = \"command\"\nunlock_command = [\"loginctl\", \"unlock-session\"]\n",
         );
-        apply_backend(&mut doc, "hyprlock-confirm", None, None, &[]).unwrap();
+        apply_backend(&mut doc, "quattro", None, None, &[]).unwrap();
         let text = doc.to_string();
-        assert!(text.contains("unlock_backend = \"hyprlock-confirm\""));
+        assert!(text.contains("unlock_backend = \"quattro\""));
         assert!(
             !text.contains("unlock_command"),
             "stale argv survived: {text}"
