@@ -1,9 +1,9 @@
-//! Lock-screen integration: Hyprlock keybinding, or Omarchy's Quattro plugin.
+//! Lock-screen integration for Omarchy's Quattro plugin.
 
 mod quattro;
 
-use crate::{atomic::write_atomic, devices};
-use std::{env, fs, path::PathBuf, process::Command};
+use crate::atomic::write_atomic;
+use std::{env, fs, io, path::PathBuf, process::Command};
 
 fn home_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
@@ -25,6 +25,7 @@ fn run(command: &mut Command) -> Result<(), String> {
 /// Returns an error when neither integration is available, or when the chosen
 /// integration cannot be applied.
 pub fn setup_omarchy() -> Result<(), String> {
+    remove_legacy_hyprlock_binding()?;
     let commands = Command::new("omarchy")
         .args(["commands", "--all"])
         .output()
@@ -32,43 +33,46 @@ pub fn setup_omarchy() -> Result<(), String> {
     if String::from_utf8_lossy(&commands.stdout).contains("omarchy plugin clone") {
         return quattro::setup();
     }
-    setup_hyprlock()
+    Err("this Omarchy build does not support the required Quattro lock-screen integration".into())
 }
 
-fn setup_hyprlock() -> Result<(), String> {
-    if !Command::new("hyprlock")
-        .arg("--version")
-        .status()
-        .is_ok_and(|status| status.success())
-    {
-        return Err("this Omarchy build has neither Quattro plugins nor Hyprlock".into());
-    }
-    devices::set_backend("hyprlock-confirm", None, None, &[])?;
+fn remove_legacy_hyprlock_binding() -> Result<(), String> {
     let bindings = home_dir()?.join(".config/hypr/bindings.lua");
-    let binding_marker = "-- omarchy-presence-unlock Alt+Enter confirmation";
-    let binding = format!(
-        "\n{binding_marker}\no.bind(\"ALT + RETURN\", \"Presence unlock confirmation\", \"omarchy-presence-unlock confirm\", {{ locked = true }})\n"
-    );
-    let binding_text = fs::read_to_string(&bindings).map_err(|error| error.to_string())?;
-    if !binding_text.contains(binding_marker) {
-        write_atomic(&bindings, &format!("{binding_text}{binding}"), 0o644)?;
+    let binding_text = match fs::read_to_string(&bindings) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let updated = without_legacy_hyprlock_binding(&binding_text);
+    if updated != binding_text {
+        write_atomic(&bindings, &updated, 0o644)?;
     }
-    run(Command::new("hyprctl").arg("reload"))?;
-    let validation = Command::new("hyprctl")
-        .arg("configerrors")
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !validation.status.success() {
-        return Err(String::from_utf8_lossy(&validation.stderr)
-            .trim()
-            .to_string());
-    }
-    if !validation.stdout.is_empty() {
-        eprintln!(
-            "Hyprland config validation output:\n{}",
-            String::from_utf8_lossy(&validation.stdout)
+    Ok(())
+}
+
+fn without_legacy_hyprlock_binding(source: &str) -> String {
+    source
+        .replace(
+            "\n-- omarchy-watch-unlock Alt+Enter confirmation.\no.bind(\"ALT + RETURN\", \"Watch unlock confirmation\", \"omarchy-watch-unlock confirm\", { locked = true })\n",
+            "\n",
+        )
+        .replace(
+            "\n-- omarchy-presence-unlock Alt+Enter confirmation\no.bind(\"ALT + RETURN\", \"Presence unlock confirmation\", \"omarchy-presence-unlock confirm\", { locked = true })\n",
+            "\n",
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_legacy_hyprlock_binding;
+
+    #[test]
+    fn removes_both_legacy_alt_enter_bindings() {
+        let old = "\n-- omarchy-watch-unlock Alt+Enter confirmation.\no.bind(\"ALT + RETURN\", \"Watch unlock confirmation\", \"omarchy-watch-unlock confirm\", { locked = true })\n";
+        let current = "\n-- omarchy-presence-unlock Alt+Enter confirmation\no.bind(\"ALT + RETURN\", \"Presence unlock confirmation\", \"omarchy-presence-unlock confirm\", { locked = true })\n";
+        assert_eq!(
+            without_legacy_hyprlock_binding(&format!("before{old}middle{current}after")),
+            "before\nmiddle\nafter"
         );
     }
-    println!("Enabled Alt+Enter unlock confirmation for Hyprlock. Restart presenced.");
-    Ok(())
 }

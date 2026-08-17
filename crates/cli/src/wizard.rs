@@ -1411,7 +1411,7 @@ fn manage_devices(screen: &Screen) -> Action {
 /// confirmation — no message to dismiss. Only `Back`/Esc leaves.
 fn choose_backend(screen: &Screen) -> Action {
     const OPTIONS: [&str; 4] = [
-        "Hyprlock Alt+Enter confirmation (recommended)",
+        "Omarchy hold Alt for 400ms (recommended)",
         "Signal another lock screen process",
         "Run a custom unlock command",
         "Disable",
