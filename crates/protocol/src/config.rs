@@ -283,7 +283,7 @@ impl ConfigFile {
     /// backend whose required parameters are missing.
     pub fn backend(&self) -> Result<Backend, ConfigError> {
         match self.unlock_backend.as_str() {
-            "quattro" | "hyprlock-confirm" | "hyprlock-signal" => Ok(Backend::Quattro),
+            "quattro" => Ok(Backend::Quattro),
             "disabled" => Ok(Backend::Disabled),
             "process-signal" => Ok(Backend::ProcessSignal {
                 process: self.unlock_process.clone().ok_or_else(|| {
@@ -400,7 +400,7 @@ mod tests {
         format!(
             r#"
 schema_version = 2
-unlock_backend = "hyprlock-confirm"
+unlock_backend = "quattro"
 quorum = "all"
 
 [[device]]
@@ -466,7 +466,7 @@ address = "AA:BB:CC:DD:EE:FF"
     #[test]
     fn a_schema_1_file_becomes_a_single_apple_watch() {
         let text = format!(
-            "schema_version = 1\nirk_base64 = \"{IRK}\"\nunlock_threshold_dbm = -55\nunlock_backend = \"hyprlock-confirm\"\n"
+            "schema_version = 1\nirk_base64 = \"{IRK}\"\nunlock_threshold_dbm = -55\nunlock_backend = \"quattro\"\n"
         );
         let settings = ConfigFile::parse(&text).unwrap().resolve().unwrap();
         assert_eq!(settings.devices.len(), 1);
@@ -477,18 +477,6 @@ address = "AA:BB:CC:DD:EE:FF"
         );
         assert_eq!(settings.devices[0].policy.threshold_dbm, -55);
         assert_eq!(settings.quorum, Quorum::Any);
-    }
-
-    #[test]
-    fn legacy_hyprlock_backends_map_to_quattro() {
-        let mut config = ConfigFile::parse(&v2()).unwrap();
-        assert_eq!(config.backend().unwrap(), Backend::Quattro);
-        config.unlock_backend = "hyprlock-signal".into();
-        assert_eq!(config.backend().unwrap(), Backend::Quattro);
-        config.unlock_backend = "disabled".into();
-        assert_eq!(config.backend().unwrap(), Backend::Disabled);
-        config.unlock_backend = "hyprlock-comfirm".into();
-        assert!(matches!(config.backend(), Err(ConfigError::Backend(_))));
     }
 
     #[test]

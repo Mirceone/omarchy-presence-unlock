@@ -132,12 +132,6 @@ fn migrate(document: &mut DocumentMut) -> Result<(), String> {
             }
         }
     }
-    if matches!(
-        document.get("unlock_backend").and_then(Item::as_str),
-        Some("hyprlock-confirm" | "hyprlock-signal")
-    ) {
-        document["unlock_backend"] = value("quattro");
-    }
     document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
     Ok(())
 }
@@ -402,7 +396,7 @@ mod tests {
     #[test]
     fn migration_moves_a_schema_1_watch_into_the_device_array() {
         let mut doc = document(
-            "schema_version = 1\nirk_base64 = \"AAAA\"\nunlock_threshold_dbm = -55\nunlock_backend = \"hyprlock-confirm\"\n",
+            "schema_version = 1\nirk_base64 = \"AAAA\"\nunlock_threshold_dbm = -55\nunlock_backend = \"quattro\"\n",
         );
         migrate(&mut doc).unwrap();
         let text = doc.to_string();
@@ -417,7 +411,7 @@ mod tests {
         assert!(text.contains("id = \"watch\""));
         assert!(text.contains("profile = \"apple-continuity\""));
         assert!(text.contains("threshold_dbm = -55"));
-        // Legacy backends migrate to Quattro while unrelated settings survive.
+        // Unrelated backend settings survive the device migration.
         assert!(text.contains("unlock_backend = \"quattro\""));
     }
 

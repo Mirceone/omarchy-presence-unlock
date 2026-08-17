@@ -259,7 +259,7 @@ fn enrolled_devices() -> Vec<(String, &'static str)> {
 /// Which unlock-backend option the config currently holds.
 fn current_backend() -> Option<usize> {
     match ConfigFile::load().ok()?.unlock_backend.as_str() {
-        "quattro" | "hyprlock-confirm" | "hyprlock-signal" => Some(0),
+        "quattro" => Some(0),
         "process-signal" => Some(1),
         "command" => Some(2),
         "disabled" => Some(3),
