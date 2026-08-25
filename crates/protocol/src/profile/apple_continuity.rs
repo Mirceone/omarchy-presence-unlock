@@ -21,7 +21,13 @@ fn evaluate(advertisement: &Advertisement<'_>) -> Observation {
         return Observation::Ignore;
     };
     match apple::parse_nearby_info(payload) {
-        Ok(info) if info.watch_locked || !info.auto_unlock_enabled => Observation::Revoke,
+        Ok(info)
+            if info.watch_locked
+                || !info.watch_auto_unlock_enabled
+                || !info.auto_unlock_enabled =>
+        {
+            Observation::Revoke
+        }
         Ok(_) => Observation::Qualify,
         // An undecodable state claim is never evidence that a Watch is unlocked.
         Err(_) => Observation::Revoke,
@@ -38,23 +44,24 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_qualifies_and_locked_or_disabled_revokes() {
+    fn unlocked_with_both_auto_unlock_flags_qualifies() {
         let bare = Advertisement::new([1; 6], -50);
-        let unlocked = frame(apple::AUTO_UNLOCK_ENABLED);
-        let locked = frame(apple::AUTO_UNLOCK_ENABLED | apple::WATCH_LOCKED);
-        let disabled = frame(0);
+        let unlocked = frame(apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED);
+        let locked = frame(
+            apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED | apple::WATCH_LOCKED,
+        );
+        let watch_auto_unlock_disabled = frame(apple::AUTO_UNLOCK_ENABLED);
+        let mac_auto_unlock_disabled = frame(apple::WATCH_AUTO_UNLOCK_ENABLED);
         assert_eq!(
             PROFILE.evaluate(&bare.with_manufacturer_data(&unlocked)),
             Observation::Qualify
         );
-        assert_eq!(
-            PROFILE.evaluate(&bare.with_manufacturer_data(&locked)),
-            Observation::Revoke
-        );
-        assert_eq!(
-            PROFILE.evaluate(&bare.with_manufacturer_data(&disabled)),
-            Observation::Revoke
-        );
+        for flags in [locked, watch_auto_unlock_disabled, mac_auto_unlock_disabled] {
+            assert_eq!(
+                PROFILE.evaluate(&bare.with_manufacturer_data(&flags)),
+                Observation::Revoke
+            );
+        }
     }
 
     #[test]

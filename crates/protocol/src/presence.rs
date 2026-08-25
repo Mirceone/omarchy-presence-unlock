@@ -419,7 +419,13 @@ mod tests {
     fn feed(fleet: &mut Fleet, address: [u8; 6], times: &[u64], rssi: i16) {
         let data = HashMap::from([(
             apple::COMPANY_ID,
-            vec![0x10, 3, 0, apple::AUTO_UNLOCK_ENABLED, 0],
+            vec![
+                0x10,
+                3,
+                0,
+                apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED,
+                0,
+            ],
         )]);
         for now in times {
             let advertisement = Advertisement::new(address, rssi).with_manufacturer_data(&data);

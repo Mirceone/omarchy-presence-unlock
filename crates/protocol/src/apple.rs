@@ -7,12 +7,14 @@ use thiserror::Error;
 
 pub const COMPANY_ID: u16 = 0x004c;
 pub const NEARBY_INFO_TYPE: u8 = 0x10;
+pub const WATCH_AUTO_UNLOCK_ENABLED: u8 = 0x40;
 pub const WATCH_LOCKED: u8 = 0x20;
 pub const AUTO_UNLOCK_ENABLED: u8 = 0x80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NearbyInfo {
     pub watch_locked: bool,
+    pub watch_auto_unlock_enabled: bool,
     pub auto_unlock_enabled: bool,
 }
 
@@ -56,6 +58,7 @@ pub fn parse_nearby_info(data: &[u8]) -> Result<NearbyInfo, ParseError> {
             let flags = payload[1];
             result = Some(NearbyInfo {
                 watch_locked: flags & WATCH_LOCKED != 0,
+                watch_auto_unlock_enabled: flags & WATCH_AUTO_UNLOCK_ENABLED != 0,
                 auto_unlock_enabled: flags & AUTO_UNLOCK_ENABLED != 0,
             });
         }
@@ -70,11 +73,12 @@ mod tests {
 
     #[test]
     fn reads_nearby_info_from_a_tlv_sequence() {
-        let data = [0x07, 1, 4, 0x10, 3, 0, 0x80, 0];
+        let data = [0x07, 1, 4, 0x10, 3, 0, 0xc0, 0];
         assert_eq!(
             parse_nearby_info(&data),
             Ok(NearbyInfo {
                 watch_locked: false,
+                watch_auto_unlock_enabled: true,
                 auto_unlock_enabled: true
             })
         );
