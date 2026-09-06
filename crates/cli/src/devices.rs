@@ -44,6 +44,22 @@ fn slug(name: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// The id of the device already enrolled with this key, if any.
+///
+/// A bonded peer rotates its address, so its key is the only stable way to
+/// recognise it. Without this, re-running an enrollment writes a second entry
+/// holding the same key, and one radio packet then satisfies both: a user who
+/// required `all` or `at-least:2` would be unlocked by a single device.
+#[must_use]
+pub fn id_for_irk(irk_base64: &str) -> Option<String> {
+    ConfigFile::load()
+        .map(|config| config.devices)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|entry| entry.irk_base64.as_deref() == Some(irk_base64))
+        .map(|entry| entry.id)
+}
+
 /// The device id is the config's primary key, not a label: [`add`] upserts on
 /// it, `status` prints it, and removal addresses devices by it. It is the
 /// app's to choose — the user is never asked.
@@ -160,11 +176,19 @@ fn save(document: &DocumentMut) -> Result<(), String> {
         .map_err(|error| format!("refusing to write an unusable config: {error}"))?
         .resolve()
         .map_err(|error| format!("refusing to write an unusable config: {error}"))?;
+    write_config(document)
+}
+
+/// Writes config.toml 0600 through a temp file inside a 0700 directory.
+///
+/// Separate from [`save`] for the one caller that legitimately writes a config
+/// with nothing enrolled, which cannot resolve by design.
+fn write_config(document: &DocumentMut) -> Result<(), String> {
     let directory = paths::config_dir().ok_or("XDG_CONFIG_HOME or HOME is required")?;
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
-    write_atomic(&config_path()?, &text, 0o600)
+    write_atomic(&config_path()?, &document.to_string(), 0o600)
 }
 
 /// Criteria keys `apply_device` owns; cleared on every update so a re-enrollment
@@ -313,8 +337,7 @@ pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Returns an error when no such device is configured, or when removing it
-/// would leave a config that cannot resolve.
+/// Returns an error when no such device is configured, or when the write fails.
 pub fn remove(id: &str) -> Result<(), String> {
     let mut document = open()?;
     if document.get("device").is_none() {
@@ -325,6 +348,14 @@ pub fn remove(id: &str) -> Result<(), String> {
     devices.retain(|table| table.get("id").and_then(Item::as_str) != Some(id));
     if devices.len() == before {
         return Err(format!("no device named {id} is configured"));
+    }
+    // Removing the last device empties the array, which does not resolve: the
+    // daemon requires at least one. Refusing the write would trap a user with
+    // one enrolled device — a lost phone is exactly when revoking matters —
+    // so an empty config is written directly as the valid "nothing enrolled"
+    // state the daemon and diagnostics already report.
+    if devices.is_empty() {
+        return write_config(&document);
     }
     save(&document)
 }

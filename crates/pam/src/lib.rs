@@ -52,7 +52,13 @@ fn authenticate(_handle: PamHandle) -> PamReturnCode {
     {
         return PamReturnCode::Authinfo_Unavail;
     }
-    if reply == wire::RESP_ALLOW {
+    reply_result(&reply)
+}
+
+fn reply_result(reply: &str) -> PamReturnCode {
+    if !reply.ends_with('\n') {
+        PamReturnCode::Authinfo_Unavail
+    } else if reply == wire::RESP_ALLOW {
         PamReturnCode::Success
     } else {
         PamReturnCode::Auth_Err
@@ -97,5 +103,15 @@ mod tests {
         ));
         drop(listener);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn requires_a_newline_terminated_reply_before_returning_a_verdict() {
+        assert_eq!(reply_result(wire::RESP_ALLOW), PamReturnCode::Success);
+        assert_eq!(
+            reply_result(wire::RESP_ALLOW.strip_suffix('\n').unwrap()),
+            PamReturnCode::Authinfo_Unavail
+        );
+        assert_eq!(reply_result("DENY\n"), PamReturnCode::Auth_Err);
     }
 }

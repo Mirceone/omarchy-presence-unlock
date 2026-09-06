@@ -137,8 +137,8 @@ enum Commands {
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
     /// Interactive menu: enroll a device, manage enrolled devices, configure
-    /// multi-device authentication, wire the lock screen, run diagnostics, and
-    /// watch live status. Also runs when no subcommand is given, in a terminal.
+    /// multi-device authentication, run diagnostics, and watch live status.
+    /// Also runs when no subcommand is given, in a terminal.
     Init,
 }
 

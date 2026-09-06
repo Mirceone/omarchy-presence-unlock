@@ -58,13 +58,23 @@ pub async fn scan(adapter_name: Option<&str>, service: Arc<Service>) -> Result<(
         let device = adapter.device(address)?;
         // RSSI is the one property every policy needs, and its absence means
         // BlueZ has no live advertisement for this device.
-        let Some(rssi) = device.rssi().await? else {
+        let Ok(Some(rssi)) = device.rssi().await else {
             continue;
         };
-        let manufacturer_data = fetch(needs.manufacturer_data, device.manufacturer_data()).await?;
-        let service_data = fetch(needs.service_data, device.service_data()).await?;
-        let service_uuids = fetch(needs.service_uuids, device.uuids()).await?;
-        let name = fetch(needs.name, device.name()).await?;
+        let Ok(manufacturer_data) =
+            fetch(needs.manufacturer_data, device.manufacturer_data()).await
+        else {
+            continue;
+        };
+        let Ok(service_data) = fetch(needs.service_data, device.service_data()).await else {
+            continue;
+        };
+        let Ok(service_uuids) = fetch(needs.service_uuids, device.uuids()).await else {
+            continue;
+        };
+        let Ok(name) = fetch(needs.name, device.name()).await else {
+            continue;
+        };
 
         let mut advertisement = Advertisement::new(address.0, rssi);
         advertisement.manufacturer_data = manufacturer_data.as_ref();

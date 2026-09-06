@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     eprintln!(
-        "multi-device authentication {:?}, backend Omarchy Quattro (automatic), skipping per-advertisement reads: {}",
+        "multi-device authentication {:?}, skipping per-advertisement reads: {}",
         settings.multi_device_auth,
         scan::skipped_reads(fleet.needs()).join(", ")
     );

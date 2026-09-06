@@ -793,8 +793,47 @@ async fn initiate_security(device: &bluer::Device) -> Result<(), String> {
     }
 }
 
-/// Verifies the captured key against the address the kernel saw it used on,
-/// then enrolls it when asked to, reporting the id it was enrolled under.
+/// Whether this kernel event describes the peer this flow bonded with.
+///
+/// The privileged helper reports every new IRK on the controller, so a bond
+/// `bluetoothd` is driving for something else — a headset re-pairing, a second
+/// flow — arrives here too. Enrolling one of those would write a permanent
+/// unlock token for a device the user never chose, under the name of the one
+/// they did. The event carries the address it was used on, which is the
+/// address this peer connected with, so the two can be compared directly.
+fn belongs_to_peer(
+    capture: &crate::enrollment::mgmt::CapturedIrk,
+    observed: Address,
+    identity: Option<Address>,
+) -> bool {
+    if parse_address(&capture.random_address).is_ok_and(|address| address == observed.0) {
+        return true;
+    }
+    // A peer that connected under a fixed address has no RPA to match, so its
+    // identity is the only thing that can tie the event to it.
+    identity.is_some_and(|identity| {
+        parse_address(&capture.identity_address).is_ok_and(|address| address == identity.0)
+    })
+}
+
+/// Waits for the IRK of the peer that bonded, ignoring anyone else's.
+async fn capture_peer_irk(
+    monitor: &mut crate::enrollment::mgmt::Monitor,
+    device: &bluer::Device,
+    observed: Address,
+) -> Result<crate::enrollment::mgmt::CapturedIrk, String> {
+    // After bonding this reports the identity address rather than the RPA,
+    // which is what makes it usable as a second way to recognise the peer.
+    let identity = device.remote_address().await.ok();
+    loop {
+        let capture = monitor.next_irk().await?;
+        if belongs_to_peer(&capture, observed, identity) {
+            return Ok(capture);
+        }
+    }
+}
+
+/// Enrolls a key already proven to belong to the peer that bonded.
 ///
 /// `id` is what the caller insisted on; `name` is what will name the id when
 /// the caller insisted on nothing; `reported` is the peer's own name, carried
@@ -808,20 +847,22 @@ fn save_capture(
     save: bool,
     progress: Sink<'_>,
 ) -> Result<(), String> {
-    let rpa = Address::new(
-        parse_address(&capture.random_address)
-            .map_err(|error| format!("kernel reported an invalid RPA: {error}"))?,
-    );
-    self_check(&capture.key, rpa)?;
     if !save {
         return Ok(());
     }
-    let id = id.map_or_else(|| devices::derive_id(name, None), str::to_string);
+    let irk_base64 = STANDARD.encode(capture.key);
+    // The same device enrolled twice is one device, not two: its key already
+    // names an entry, and a second entry holding it would let one radio packet
+    // satisfy a rule the user set expecting two devices.
+    let id = id
+        .map(str::to_string)
+        .or_else(|| devices::id_for_irk(&irk_base64))
+        .unwrap_or_else(|| devices::derive_id(name, None));
     devices::add(
         &id,
         profile,
         &Criteria {
-            irk_base64: Some(STANDARD.encode(capture.key)),
+            irk_base64: Some(irk_base64),
             ..Criteria::default()
         },
         &Overrides {
@@ -969,11 +1010,16 @@ async fn active_capture(
     let result = async {
         initiate_security(&device).await?;
         progress(Progress::Phase(Phase::Bonded));
-        let captured = tokio::time::timeout(IRK_WAIT, monitor.next_irk())
-            .await
-            .map_err(|_| {
-                "bonding completed, but the kernel produced no remote IRK".to_string()
-            })??;
+        let captured =
+            tokio::time::timeout(IRK_WAIT, capture_peer_irk(&mut monitor, &device, observed))
+                .await
+                .map_err(|_| {
+                    "bonding completed, but the kernel produced no remote IRK for this device"
+                        .to_string()
+                })??;
+        // Proves the key resolves the address this peer was actually using,
+        // which no self-consistent event can fake.
+        self_check(&captured.key, observed)?;
         progress(Progress::Phase(Phase::IdentityReceived));
         let peer_name = resolve_peer_name(&device).await;
         let named = peer_name.clone();
@@ -1071,8 +1117,13 @@ async fn advertise_flow(
         .pairable_timeout()
         .await
         .map_err(|error| error.to_string())?;
+    // Bounded rather than indefinite: a SIGTERM or a second Ctrl+C exits
+    // without unwinding, and adapter pairability outlives this process, so the
+    // controller must be able to close the window on its own. The margin
+    // covers the bonding that follows a connection accepted at the deadline.
+    let window = u32::try_from(timeout_secs.saturating_add(60)).unwrap_or(u32::MAX);
     adapter
-        .set_pairable_timeout(0)
+        .set_pairable_timeout(window)
         .await
         .map_err(|error| error.to_string())?;
     if let Err(error) = adapter.set_pairable(true).await {
@@ -1097,11 +1148,16 @@ async fn advertise_flow(
             timeout_secs,
             &capture,
         ) => result,
-        () = cancelled(cancel) => {
-            cleanup_new_capture_devices(&adapter, &established, progress).await;
-            Err("cancelled".to_string())
-        },
+        () = cancelled(cancel) => Err("cancelled".to_string()),
     };
+    // Any exit that is not a completed enrollment may still have left a bond,
+    // and an abandoned bond holds keys. The timeout path is the reachable one:
+    // a peer that connects and bonds inside one poll interval is never claimed
+    // by `await_incoming_connection`, so the flow waits out its budget while
+    // BlueZ keeps the record.
+    if result.is_err() {
+        cleanup_new_capture_devices(&adapter, &established, progress).await;
+    }
     progress(Progress::Cleanup(Cleanup {
         label: "Adapter settings restored",
         ok: restore_pairability(&adapter, previous_pairable, previous_timeout)

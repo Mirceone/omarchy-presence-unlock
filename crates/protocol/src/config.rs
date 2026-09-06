@@ -115,6 +115,10 @@ pub enum ConfigError {
     NoDevices,
     #[error("unsupported multi-device authentication rule {0}; use any, all, or at-least:<n>")]
     MultiDeviceAuth(String),
+    #[error(
+        "at-least:{required} needs {required} enrolled devices but {configured} are configured; run `omarchy-presence-unlock multi-device-auth any`"
+    )]
+    MultiDeviceAuthExceedsDeviceCount { required: u8, configured: usize },
 }
 
 impl ConfigFile {
@@ -160,9 +164,18 @@ impl ConfigFile {
             }
             devices.push(entry.resolve()?);
         }
+        let multi_device_auth = self.multi_device_auth()?;
+        if let MultiDeviceAuth::AtLeast(required) = multi_device_auth
+            && usize::from(required) > devices.len()
+        {
+            return Err(ConfigError::MultiDeviceAuthExceedsDeviceCount {
+                required,
+                configured: devices.len(),
+            });
+        }
         Ok(Settings {
             adapter: self.adapter.clone(),
-            multi_device_auth: self.multi_device_auth()?,
+            multi_device_auth,
             devices,
         })
     }
@@ -375,6 +388,17 @@ address = "AA:BB:CC:DD:EE:FF"
                 Err(ConfigError::MultiDeviceAuth(_))
             ));
         }
+    }
+
+    #[test]
+    fn an_at_least_rule_exceeding_enrolled_devices_is_rejected() {
+        let mut config = ConfigFile::parse(&current_config()).unwrap();
+        config.multi_device_auth = Some("at-least:3".into());
+        let error = config.resolve().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "at-least:3 needs 3 enrolled devices but 2 are configured; run `omarchy-presence-unlock multi-device-auth any`"
+        );
     }
 
     #[test]

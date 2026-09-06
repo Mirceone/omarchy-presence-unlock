@@ -42,7 +42,12 @@ pub struct Check {
 #[must_use]
 pub fn report() -> Vec<Check> {
     let mut checks = Vec::new();
-    if let Err(problem) = collect(&mut checks) {
+    let result = collect(&mut checks);
+    finish_report(checks, result)
+}
+
+fn finish_report(mut checks: Vec<Check>, result: Result<(), String>) -> Vec<Check> {
+    if let Err(problem) = result {
         checks.push(Check {
             ok: false,
             label: problem,
@@ -81,8 +86,23 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
             path.display()
         ));
     }
+    pass(
+        checks,
+        format!(
+            "schema {}, {} device(s), multi-device authentication {:?}",
+            config.schema_version,
+            settings.devices.len(),
+            settings.multi_device_auth
+        ),
+    );
 
     validate_quattro(quattro_integration().as_ref())?;
+    pass(
+        checks,
+        format!("companion plugin {PLUGIN_ID} with stock lock {STOCK_PLUGIN_ID}"),
+    );
+    pass(checks, "Alt hold/release binding".to_string());
+    pass(checks, format!("presence PAM policy {PAM_POLICY}"));
 
     let socket = current_socket_path();
     let metadata = fs::metadata(&socket).map_err(|_| {
@@ -102,6 +122,14 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
             socket.display()
         ));
     }
+    pass(
+        checks,
+        format!(
+            "presenced {}, private socket {}",
+            user_service_state(),
+            socket.display()
+        ),
+    );
 
     let reported = client::request_lines(wire::REQ_STATUS, Duration::from_millis(200))?;
     let devices = reported
@@ -115,27 +143,17 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
         ));
     }
 
-    let mut pass = |label: String| checks.push(Check { ok: true, label });
-    pass(format!(
-        "schema {}, {} device(s), multi-device authentication {:?}",
-        config.schema_version,
-        settings.devices.len(),
-        settings.multi_device_auth
-    ));
-    pass(format!(
-        "companion plugin {PLUGIN_ID} with stock lock {STOCK_PLUGIN_ID}"
-    ));
-    pass("Alt hold/release binding".to_string());
-    pass(format!("presence PAM policy {PAM_POLICY}"));
-    pass(format!(
-        "presenced {}, private socket {}",
-        user_service_state(),
-        socket.display()
-    ));
     for device in &settings.devices {
-        pass(format!("device {} ({})", device.id, device.profile.id()));
+        pass(
+            checks,
+            format!("device {} ({})", device.id, device.profile.id()),
+        );
     }
     Ok(())
+}
+
+fn pass(checks: &mut Vec<Check>, label: String) {
+    checks.push(Check { ok: true, label });
 }
 
 fn quattro_integration() -> Option<QuattroIntegration> {
@@ -262,5 +280,21 @@ mod tests {
         assert!(plugin_enabled_in(listing, PLUGIN_ID));
         assert!(!plugin_enabled_in(listing, STOCK_PLUGIN_ID));
         assert!(!plugin_enabled_in(listing, "bob.lock"));
+    }
+
+    #[test]
+    fn a_failed_report_keeps_preceding_completed_checks() {
+        let checks = finish_report(
+            vec![Check {
+                ok: true,
+                label: "configuration is valid".into(),
+            }],
+            Err("presenced socket is absent".into()),
+        );
+
+        assert!(checks[0].ok);
+        assert_eq!(checks[0].label, "configuration is valid");
+        assert!(!checks[1].ok);
+        assert_eq!(checks[1].label, "presenced socket is absent");
     }
 }

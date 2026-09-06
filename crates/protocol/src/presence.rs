@@ -190,7 +190,7 @@ pub enum MultiDeviceAuth {
     Any,
     /// Every configured device must be present.
     All,
-    /// At least `n` devices must be present.
+    /// At least `n` devices must be present; a rule that exceeds enrollment denies.
     AtLeast(u8),
 }
 
@@ -199,7 +199,7 @@ impl MultiDeviceAuth {
         match self {
             Self::Any => 1,
             Self::All => total,
-            Self::AtLeast(n) => usize::from(n).min(total).max(1),
+            Self::AtLeast(n) => usize::from(n).max(1),
         }
     }
 }
@@ -490,6 +490,23 @@ mod tests {
             Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH)
         );
         feed(&mut fleet, [9, 9, 9, 9, 9, 9], &[100, 400], -60);
+        assert_eq!(fleet.check(500), Decision::Allow);
+    }
+
+    #[test]
+    fn an_at_least_rule_exceeding_enrollment_denies_with_multi_device_auth() {
+        let mut fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::AtLeast(2));
+        feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
+        assert_eq!(
+            fleet.check(500),
+            Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH)
+        );
+    }
+
+    #[test]
+    fn an_at_least_one_rule_allows_one_eligible_device() {
+        let mut fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::AtLeast(1));
+        feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
         assert_eq!(fleet.check(500), Decision::Allow);
     }
 

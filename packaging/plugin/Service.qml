@@ -50,14 +50,6 @@ Item {
     return token
   }
 
-  function confirmPresence() {
-    var token = refusalToken()
-    if (token) return logRefusal(token)
-
-    startPresencePam()
-    return "checking"
-  }
-
   function startPresencePam() {
     var lock = lockService()
     if (!lockCompatible() || !lock || !lock.locked || !pamConfigured) return false
@@ -154,7 +146,9 @@ Item {
       return "ok"
     }
 
-    function confirm(): string { return root.confirmPresence() }
+    // No method authenticates without the hold: the deliberate gesture is the
+    // whole of the user's intent, and an IPC target any session process can
+    // reach must not offer a way around it.
     function ping(): string { return "ok" }
   }
 

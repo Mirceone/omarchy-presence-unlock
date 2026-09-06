@@ -103,10 +103,11 @@ fn service_qml_declares_ipc_target_and_required_methods() {
         "Service.qml must declare release() method (called on Alt key RELEASE; cancels hold timer)"
     );
 
-    // Must declare confirm() method (authenticates immediately with no hold timing).
+    // No method may authenticate without the hold: the gesture is the user's
+    // only expression of intent, and any session process can call this target.
     assert!(
-        service_content.contains("confirm"),
-        "Service.qml must declare confirm() method (immediate authentication; used for scripting and doctor checks)"
+        !service_content.contains("function confirm"),
+        "Service.qml must not offer an IPC method that authenticates without the 400ms hold"
     );
 
     // Must declare ping() method (health check).

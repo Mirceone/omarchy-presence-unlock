@@ -11,7 +11,7 @@ else
 fi
 UNIT=presenced.service
 PATH_UNIT=presenced.path
-USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}}
+USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}/.config}
 CONFIG_FILE=$USER_CONFIG_HOME/omarchy-presence-unlock/config.toml
 REPOSITORY=${OPU_REPOSITORY:-Mirceone/omarchy-presence-unlock}
 REF=${OPU_REF:-main}

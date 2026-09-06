@@ -17,9 +17,9 @@
 //! Enrollment is a short guided flow that closes itself. `Enter` advances,
 //! `Esc` backs out of the current screen, and `Ctrl+C` leaves the wizard —
 //! nothing here asks for `Ctrl+C` as the ordinary way to dismiss a finished
-//! screen. The two enrollment routes are deliberately not described alike:
-//! an Apple Watch really pairs and enrolls an identity key, while any other
-//! device is only located and remembered by address.
+//! screen. Guided pairing (a Watch or phone) captures an identity key, while
+//! the "Other Bluetooth device" route only locates a device and remembers its
+//! address.
 
 use crate::ui::{Frame, Mark, Menu, Screen};
 use crate::{client, devices, doctor, enrollment, interrupt, pairing, ui};
@@ -838,18 +838,18 @@ fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Ac
         prime_sudo(screen, &format!("Pair {}", provider.label()), "Step 2 of 3")?;
 
         let (state, result, cancelled, daemon) = run_pairing(screen, provider, &advertised_as);
-        // Ctrl+C asked to leave, and the operation has now unwound; the caller
-        // returns rather than painting another screen.
-        if interrupt::quit_requested() {
-            return Ok(false);
-        }
-        if cancelled {
-            flash(screen, &pair_cancelled_frame(screen, &state, &daemon))?;
-            return Ok(false);
-        }
         match result {
             Ok(()) => return pair_success(screen, provider, &state, &daemon),
             Err(error) => {
+                // Ctrl+C asked to leave, and the operation has now unwound;
+                // the caller returns rather than painting another screen.
+                if interrupt::quit_requested() {
+                    return Ok(false);
+                }
+                if cancelled {
+                    flash(screen, &pair_cancelled_frame(screen, &state, &daemon))?;
+                    return Ok(false);
+                }
                 if !pair_failure(screen, provider, &state, &error, &daemon)? {
                     return Ok(false);
                 }
@@ -1256,8 +1256,8 @@ fn enroll_manual_irk(screen: &Screen) -> Action {
 // ---------------------------------------------------------------------------
 
 /// The enrollment menu. Names what each route enrolls, never how it works:
-/// the distinction that matters to a user is that a Watch really pairs and
-/// anything else is only located.
+/// guided pairing for a Watch or phone captures an identity key, while the
+/// "Other Bluetooth device" route only locates a device by address.
 fn enroll_menu(screen: &Screen) -> Action {
     let mut selected = 0;
     loop {
@@ -1411,10 +1411,6 @@ fn diagnostics_frame(screen: &Screen, checks: &[doctor::Check]) -> Frame {
     let mut frame = screen.frame();
     frame.title("Diagnostics", None);
     frame.blank();
-    if checks.is_empty() {
-        frame.line("Nothing could be checked.");
-        return frame;
-    }
     for check in checks {
         frame.mark(
             if check.ok { Mark::Done } else { Mark::Failed },
