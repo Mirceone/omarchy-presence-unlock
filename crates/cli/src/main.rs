@@ -136,6 +136,14 @@ enum Commands {
     Status,
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
+    /// Remove the lock-screen integration, the binding, the PAM policy, and
+    /// the presence service. Installed files under /usr are reported rather
+    /// than deleted: they are root-owned and a package may own them.
+    Uninstall {
+        /// Also delete the enrolled devices and their keys.
+        #[arg(long)]
+        forget_devices: bool,
+    },
     /// Interactive menu: enroll a device, manage enrolled devices, configure
     /// multi-device authentication, run diagnostics, and watch live status.
     /// Also runs when no subcommand is given, in a terminal.
@@ -223,6 +231,41 @@ fn status() -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the integration and the service, reporting each step as it goes.
+///
+/// Every step is attempted whatever the ones before it did, so a single
+/// failure — a declined sudo prompt, say — cannot strand the rest.
+fn uninstall(forget_devices: bool) -> Result<(), String> {
+    let steps = setup::uninstall(if forget_devices {
+        setup::Enrollment::Forget
+    } else {
+        setup::Enrollment::Keep
+    });
+    let mut failed = 0;
+    for step in &steps {
+        match &step.detail {
+            None => println!("ok: {}", step.label),
+            Some(detail) => {
+                failed += 1;
+                eprintln!("failed: {} — {detail}", step.label);
+            }
+        }
+    }
+    let remaining = setup::remaining_system_files();
+    if !remaining.is_empty() {
+        if setup::packaged() {
+            println!("remove the package to finish: pacman -Rns omarchy-presence-unlock");
+        } else {
+            println!("finish by hand: sudo rm -rf {}", remaining.join(" "));
+        }
+    }
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} removal step(s) did not complete"))
+    }
+}
+
 fn main() {
     let Cli { command } = Cli::parse();
     let result = match command {
@@ -295,6 +338,7 @@ fn main() {
         Some(Commands::Doctor) => doctor::doctor(),
         Some(Commands::Status) => status(),
         Some(Commands::SetupOmarchy) => setup::setup_omarchy(),
+        Some(Commands::Uninstall { forget_devices }) => uninstall(forget_devices),
         Some(Commands::Init) => wizard::run(),
     };
     if let Err(error) = result {

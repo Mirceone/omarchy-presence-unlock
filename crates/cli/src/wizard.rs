@@ -22,7 +22,7 @@
 //! address.
 
 use crate::ui::{Frame, Mark, Menu, Screen};
-use crate::{client, devices, doctor, enrollment, interrupt, pairing, ui};
+use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
 use enrollment::{Cleanup, Phase, Progress};
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile, presence::MultiDeviceAuth, profile, wire,
@@ -1667,15 +1667,110 @@ fn live_status(screen: &Screen) -> Action {
     }
 }
 
+/// What removal is about to take, so consent is informed rather than implied.
+fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
+    let mut frame = screen.frame();
+    frame.title("Uninstall", None);
+    frame.blank();
+    frame.line("This removes:");
+    frame.blank();
+    frame.bullet("the companion plugin, leaving Omarchy's own lock screen in place");
+    frame.bullet("the Alt unlock binding");
+    frame.bullet("the presence PAM policy, which asks for sudo");
+    frame.bullet("the presence service");
+    frame.blank();
+    let remaining = setup::remaining_system_files();
+    if !remaining.is_empty() {
+        // Root owns these and a package may too, so removal reports them
+        // rather than deleting them behind the user's back.
+        frame.line(if setup::packaged() {
+            "Installed files belong to a package: remove it with `pacman -Rns omarchy-presence-unlock`.".to_string()
+        } else {
+            format!(
+                "{} installed file(s) under /usr stay; the next screen lists them.",
+                remaining.len()
+            )
+        });
+        frame.blank();
+    }
+    frame.line(match enrolled {
+        0 => "Nothing is enrolled.".to_string(),
+        1 => "One device is enrolled.".to_string(),
+        count => format!("{count} devices are enrolled."),
+    });
+    frame
+}
+
+/// What removal did, and whatever it could not finish.
+fn uninstall_report(screen: &Screen, steps: &[setup::Step]) -> Frame {
+    let mut frame = screen.frame();
+    frame.title("Uninstall", None);
+    frame.blank();
+    for step in steps {
+        frame.mark(
+            if step.ok { Mark::Done } else { Mark::Failed },
+            &match &step.detail {
+                Some(detail) => format!("{} — {}", step.label, ui::sentence(detail)),
+                None => step.label.clone(),
+            },
+        );
+    }
+    let remaining = setup::remaining_system_files();
+    if !remaining.is_empty() {
+        frame.blank();
+        frame.line(if setup::packaged() {
+            "Remove the package to finish: pacman -Rns omarchy-presence-unlock".to_string()
+        } else {
+            "Finish by hand: sudo rm -rf".to_string()
+        });
+        for path in &remaining {
+            frame.bullet(path);
+        }
+    }
+    frame
+}
+
+/// Removal, with the one decision that cannot be undone made explicitly.
+fn uninstall(screen: &Screen) -> Action {
+    let enrolled = enrolled_devices().len();
+    let mut items = vec!["Remove, keep enrolled devices".to_string()];
+    if enrolled > 0 {
+        items.push("Remove everything, including enrolled devices".to_string());
+    }
+    items.push("Back".into());
+    let back = items.len() - 1;
+
+    let Some(choice) = Menu::new(uninstall_head(screen, enrolled), items)
+        .selected(back)
+        .run(screen)?
+    else {
+        return Ok(false);
+    };
+    if choice == back {
+        return Ok(false);
+    }
+    let enrollment = if choice == 0 {
+        setup::Enrollment::Keep
+    } else {
+        setup::Enrollment::Forget
+    };
+
+    prime_sudo(screen, "Uninstall", "")?;
+    let steps = setup::uninstall(enrollment);
+    show(screen, uninstall_report(screen, &steps))?;
+    Ok(false)
+}
+
 /// The setup command owns the lock-screen integration: it is applied by the
 /// installer and re-applied by `setup-omarchy`, so offering it here only
 /// invited a user to install what is already installed.
-const MAIN_MENU: [&str; 6] = [
+const MAIN_MENU: [&str; 7] = [
     "Enroll a device",
     "Manage enrolled devices",
     "Multi-device authentication",
     "Run diagnostics",
     "View live status",
+    "Uninstall",
     "Exit",
 ];
 
@@ -1716,7 +1811,8 @@ pub fn run() -> Result<(), String> {
             1 => manage_devices(&screen),
             2 => choose_multi_device_auth(&screen),
             3 => diagnostics(&screen).map(|()| false),
-            _ => live_status(&screen),
+            4 => live_status(&screen),
+            _ => uninstall(&screen),
         };
         // Ctrl+C during the action asked to leave, and the action has now
         // unwound. Returning rather than exiting is the point: `AltScreen`

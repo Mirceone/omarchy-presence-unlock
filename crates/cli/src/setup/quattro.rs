@@ -9,11 +9,11 @@ use std::{
     time::Duration,
 };
 
-const PLUGIN_ID: &str = "presence.unlock";
+pub(super) const PLUGIN_ID: &str = "presence.unlock";
 const STOCK_PLUGIN_ID: &str = "omarchy.lock";
-const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
-const BINDING_START: &str = "-- omarchy-presence-unlock:start";
-const BINDING_END: &str = "-- omarchy-presence-unlock:end";
+pub(super) const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
+pub(super) const BINDING_START: &str = "-- omarchy-presence-unlock:start";
+pub(super) const BINDING_END: &str = "-- omarchy-presence-unlock:end";
 // The press edge ignores mods because Hyprland has not yet folded Alt into the
 // modmask at Alt's own press. The release edge needs the target modmask plus
 // `release`; the QML plugin, rather than Hyprland's `long_press`, owns the hold
@@ -33,7 +33,7 @@ for _, presence_key in ipairs({ "ALT_L", "ALT_R" }) do
 end
 -- omarchy-presence-unlock:end"#;
 
-fn home_dir() -> Result<PathBuf, String> {
+pub(super) fn home_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| "HOME is not set".to_string())
@@ -43,15 +43,15 @@ fn plugins_dir() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".config/omarchy/plugins"))
 }
 
-fn plugin_dir() -> Result<PathBuf, String> {
+pub(super) fn plugin_dir() -> Result<PathBuf, String> {
     Ok(plugins_dir()?.join(PLUGIN_ID))
 }
 
-fn bindings_path() -> Result<PathBuf, String> {
+pub(super) fn bindings_path() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".config/hypr/bindings.lua"))
 }
 
-fn state_dir() -> Result<PathBuf, String> {
+pub(super) fn state_dir() -> Result<PathBuf, String> {
     let base = match env::var_os("XDG_STATE_HOME") {
         Some(path) => PathBuf::from(path),
         None => home_dir()?.join(".local/state"),
@@ -59,15 +59,15 @@ fn state_dir() -> Result<PathBuf, String> {
     Ok(base.join("omarchy-presence-unlock"))
 }
 
-fn obsolete_update_hook() -> Result<PathBuf, String> {
+pub(super) fn obsolete_update_hook() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".config/omarchy/hooks/post-update.d/omarchy-presence-unlock"))
 }
 
-fn path_exists(path: &Path) -> bool {
+pub(super) fn path_exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-fn remove_path(path: &Path) -> Result<(), String> {
+pub(super) fn remove_path(path: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink() || metadata.is_file() {
         fs::remove_file(path).map_err(|error| error.to_string())
@@ -219,7 +219,7 @@ fn remove_obsolete_update_hook() -> Result<(), String> {
     Ok(())
 }
 
-fn reload_hyprland() -> Result<(), String> {
+pub(super) fn reload_hyprland() -> Result<(), String> {
     super::run(Command::new("hyprctl").arg("reload"))?;
     let output = Command::new("hyprctl")
         .arg("configerrors")
