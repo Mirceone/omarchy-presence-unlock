@@ -9,10 +9,6 @@ if [[ -n $SCRIPT_SOURCE ]]; then
 else
   PROJECT_DIR=
 fi
-UNIT=presenced.service
-PATH_UNIT=presenced.path
-USER_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:?HOME is unset}/.config}
-CONFIG_FILE=$USER_CONFIG_HOME/omarchy-presence-unlock/config.toml
 REPOSITORY=${OPU_REPOSITORY:-Mirceone/omarchy-presence-unlock}
 REF=${OPU_REF:-main}
 
@@ -42,12 +38,11 @@ if [[ -z $PROJECT_DIR || ! -f $PROJECT_DIR/Cargo.lock ]]; then
   exit
 fi
 
-for command in cargo install sudo systemctl; do
+for command in cargo install sudo; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
 [[ $(uname -m) == x86_64 ]] || die "this project currently supports x86-64 only"
-[[ -n ${XDG_RUNTIME_DIR:-} ]] || die "XDG_RUNTIME_DIR is unset; run the installer from your logged-in desktop session"
 
 cd "$PROJECT_DIR"
 
@@ -78,7 +73,7 @@ sudo install -Dm755 target/release/presenced /usr/bin/presenced
 sudo install -Dm755 target/release/libpam_omarchy_presence_unlock.so /usr/lib/security/pam_omarchy_presence_unlock.so
 sudo install -Dm644 packaging/presenced.service /usr/lib/systemd/user/presenced.service
 sudo install -Dm644 packaging/presenced.path /usr/lib/systemd/user/presenced.path
-sudo install -Dm644 packaging/omarchy-lock-presence.pam /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
+sudo install -Dm644 packaging/omarchy-lock-presence.pam /etc/pam.d/omarchy-lock-presence
 sudo install -Dm644 packaging/plugin/manifest.json /usr/share/omarchy-presence-unlock/plugin/manifest.json
 sudo install -Dm644 packaging/plugin/Service.qml /usr/share/omarchy-presence-unlock/plugin/Service.qml
 sudo install -Dm644 README.md /usr/share/doc/omarchy-presence-unlock/README.md
@@ -90,39 +85,24 @@ required_installed=(
   /usr/lib/security/pam_omarchy_presence_unlock.so
   /usr/lib/systemd/user/presenced.service
   /usr/lib/systemd/user/presenced.path
-  /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
+  /etc/pam.d/omarchy-lock-presence
   /usr/share/omarchy-presence-unlock/plugin/manifest.json
   /usr/share/omarchy-presence-unlock/plugin/Service.qml
 )
 for path in "${required_installed[@]}"; do
   [[ -f $path ]] || die "installation failed; expected file missing: $path"
 done
-
-
-printf 'Enabling the user service and configuration watcher...\n'
-systemctl --user daemon-reload
-systemctl --user enable "$UNIT" "$PATH_UNIT"
-if [[ -f $CONFIG_FILE ]]; then
-  if ! systemctl --user restart "$UNIT"; then
-    systemctl --user status --no-pager "$UNIT" >&2 || true
-    die "$UNIT was installed but could not be restarted"
-  fi
-  if ! systemctl --user is-active --quiet "$UNIT"; then
-    systemctl --user status --no-pager "$UNIT" >&2 || true
-    die "$UNIT was installed but did not remain active"
-  fi
-  SERVICE_RESULT="restarted $UNIT"
-else
-  # A daemon with no enrolled devices deliberately refuses to run. Leave the
-  # enabled unit stopped; the path unit starts it when configuration appears.
-  systemctl --user stop "$UNIT"
-  SERVICE_RESULT="enabled $UNIT; it will start automatically after you enroll a device"
-fi
-systemctl --user restart "$PATH_UNIT"
-
 command -v omarchy-presence-unlock >/dev/null 2>&1 \
   || die "installation succeeded, but /usr/bin is not on PATH"
 
-printf '\nInstalled Omarchy Presence Unlock and %s.\n' "$SERVICE_RESULT"
-printf 'Run omarchy-presence-unlock to open the setup menu.\n'
-printf 'Lock-screen gesture integration is applied by omarchy-presence-unlock setup-omarchy.\n'
+if [[ -n ${XDG_RUNTIME_DIR:-} ]] \
+  && command -v omarchy-shell >/dev/null 2>&1 \
+  && omarchy-shell shell ping >/dev/null 2>&1; then
+  printf 'Applying per-user Omarchy integration...\n'
+  omarchy-presence-unlock setup
+  printf '\nInstalled Omarchy Presence Unlock and applied per-user integration.\n'
+else
+  printf '\nInstalled Omarchy Presence Unlock system files.\n'
+  printf 'Run omarchy-presence-unlock setup from inside your logged-in Omarchy session.\n'
+fi
+

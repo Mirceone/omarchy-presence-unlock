@@ -1,0 +1,13 @@
+post_install() {
+  echo "Run 'omarchy-presence-unlock setup' as your desktop user inside your Omarchy session to apply per-user integration."
+  echo "Pacman cannot do this: it runs as root without your home, D-Bus, or compositor session."
+}
+
+post_upgrade() {
+  echo "The Omarchy shell caches the installed plugin; rescanPlugins does not reload it."
+  echo "Run 'omarchy-presence-unlock setup' from inside your Omarchy session; it detects the change and restarts the shell."
+}
+
+pre_remove() {
+  echo "Per-user integration is not package-owned; remove its plugin symlink, binding, units, and enrolled devices with 'omarchy-presence-unlock uninstall'."
+}

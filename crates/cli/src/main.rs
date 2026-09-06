@@ -134,8 +134,10 @@ enum Commands {
     Doctor,
     /// Print the daemon's per-device and aggregate decision.
     Status,
-    /// Install the lock-screen integration for this Omarchy build.
-    SetupOmarchy,
+    /// Apply the lock-screen integration for this user: the Omarchy shell
+    /// plugin, the Alt binding, and the presence service. Unprivileged, and
+    /// safe to rerun after an Omarchy or package update.
+    Setup,
     /// Remove the lock-screen integration, the binding, the PAM policy, and
     /// the presence service. Installed files under /usr are reported rather
     /// than deleted: they are root-owned and a package may own them.
@@ -337,7 +339,7 @@ fn main() {
         Some(Commands::MgmtMonitor { adapter_index }) => enrollment::run_mgmt_helper(adapter_index),
         Some(Commands::Doctor) => doctor::doctor(),
         Some(Commands::Status) => status(),
-        Some(Commands::SetupOmarchy) => setup::setup_omarchy(),
+        Some(Commands::Setup) => setup::apply(),
         Some(Commands::Uninstall { forget_devices }) => uninstall(forget_devices),
         Some(Commands::Init) => wizard::run(),
     };

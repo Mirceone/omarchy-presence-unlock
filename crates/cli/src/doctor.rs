@@ -169,24 +169,24 @@ fn quattro_integration() -> Option<QuattroIntegration> {
 
 fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), String> {
     let integration = integration.ok_or(
-        "the Quattro integration path cannot be resolved; run `omarchy-presence-unlock setup-omarchy`",
+        "the Quattro integration path cannot be resolved; run `omarchy-presence-unlock setup`",
     )?;
     let service = fs::read_to_string(&integration.service).map_err(|_| {
         format!(
-            "presence companion service {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            "presence companion service {} is missing; run `omarchy-presence-unlock setup`",
             integration.service.display()
         )
     })?;
     if !service.contains(SERVICE_MARKER) {
         return Err(
-            "the installed companion plugin is not the current presence integration; rerun `omarchy-presence-unlock setup-omarchy`"
+            "the installed companion plugin is not the current presence integration; rerun `omarchy-presence-unlock setup`"
                 .into(),
         );
     }
 
     let bindings = fs::read_to_string(&integration.bindings).map_err(|_| {
         format!(
-            "Hyprland bindings file {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            "Hyprland bindings file {} is missing; run `omarchy-presence-unlock setup`",
             integration.bindings.display()
         )
     })?;
@@ -203,14 +203,14 @@ fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), Stri
     ] {
         if !bindings.contains(required) {
             return Err(format!(
-                "the Alt presence binding is incomplete (missing {required:?}); rerun `omarchy-presence-unlock setup-omarchy`"
+                "the Alt presence binding is incomplete (missing {required:?}); rerun `omarchy-presence-unlock setup`"
             ));
         }
     }
 
     if !std::path::Path::new(PAM_POLICY).is_file() {
         return Err(format!(
-            "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup-omarchy`"
+            "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup`"
         ));
     }
     if !plugin_is_enabled(PLUGIN_ID) {
@@ -220,7 +220,7 @@ fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), Stri
     }
     if !plugin_is_enabled(STOCK_PLUGIN_ID) {
         return Err(format!(
-            "stock lock plugin {STOCK_PLUGIN_ID} is not enabled; rerun `omarchy-presence-unlock setup-omarchy`"
+            "stock lock plugin {STOCK_PLUGIN_ID} is not enabled; rerun `omarchy-presence-unlock setup`"
         ));
     }
     if !companion_responds() {

@@ -1762,7 +1762,7 @@ fn uninstall(screen: &Screen) -> Action {
 }
 
 /// The setup command owns the lock-screen integration: it is applied by the
-/// installer and re-applied by `setup-omarchy`, so offering it here only
+/// installer and re-applied by `setup`, so offering it here only
 /// invited a user to install what is already installed.
 const MAIN_MENU: [&str; 7] = [
     "Enroll a device",

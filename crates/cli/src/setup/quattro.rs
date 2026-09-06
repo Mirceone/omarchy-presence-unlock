@@ -2,7 +2,7 @@ use crate::atomic::write_atomic;
 use omarchy_presence_unlock_protocol::paths;
 use std::{
     env, fs,
-    os::unix::{fs::PermissionsExt, fs::symlink},
+    os::unix::fs::symlink,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -91,21 +91,18 @@ fn archive(directory: &Path, name: &str) -> Result<(), String> {
     fs::rename(directory, destination).map_err(|error| error.to_string())
 }
 
-fn install_policy(source: &Path) -> Result<(), String> {
-    let installed = Path::new(PAM_POLICY);
-    let current = fs::read(source).ok() == fs::read(installed).ok()
-        && fs::metadata(installed)
-            .is_ok_and(|metadata| metadata.permissions().mode() & 0o777 == 0o644);
-    if current {
+/// Whether the system half of the install is present.
+///
+/// The policy is a system file describing a system PAM module, identical for
+/// every user, so whatever installed the module owns it too. Checking rather
+/// than installing it is what keeps this whole command unprivileged.
+fn policy_installed() -> Result<(), String> {
+    if Path::new(PAM_POLICY).is_file() {
         return Ok(());
     }
-    super::run(Command::new("sudo").args([
-        "install",
-        "-m",
-        "0644",
-        source.to_str().ok_or("invalid policy path")?,
-        PAM_POLICY,
-    ]))
+    Err(format!(
+        "the presence PAM policy is missing at {PAM_POLICY}; reinstall the package, or rerun install.sh"
+    ))
 }
 
 fn render_bindings(source: &str) -> Result<String, String> {
@@ -194,6 +191,46 @@ fn install_plugin(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A fingerprint of the plugin code the shell would have to load.
+///
+/// Not a security digest: the only question is whether these bytes differ from
+/// the ones a running shell already compiled.
+fn plugin_fingerprint(source: &Path) -> Result<String, String> {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for asset in ["manifest.json", "Service.qml"] {
+        fs::read(source.join(asset))
+            .map_err(|error| format!("cannot read the {asset} plugin asset: {error}"))?
+            .hash(&mut hasher);
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn fingerprint_path() -> Result<PathBuf, String> {
+    Ok(state_dir()?.join("plugin.fingerprint"))
+}
+
+/// Restarts the Omarchy shell when the plugin code changed, and only then.
+///
+/// The plugin is symlinked from `/usr`, which the shell's file watcher does
+/// not cover, and `rescanPlugins` serves QML it has already compiled. So an
+/// upgraded plugin keeps running the old code until the shell restarts. A
+/// restart is disruptive enough to be worth avoiding when nothing changed, and
+/// silently running stale code is worse than a reload, so the applied
+/// fingerprint is recorded and compared.
+fn reload_plugin_code(source: &Path) -> Result<(), String> {
+    let fingerprint = plugin_fingerprint(source)?;
+    let stamp = fingerprint_path()?;
+    if fs::read_to_string(&stamp).is_ok_and(|applied| applied.trim() == fingerprint) {
+        return Ok(());
+    }
+    super::run(Command::new("omarchy").args(["restart", "shell"]))?;
+    fs::create_dir_all(stamp.parent().ok_or("invalid state path")?)
+        .map_err(|error| error.to_string())?;
+    write_atomic(&stamp, &format!("{fingerprint}\n"), 0o644)
+}
+
 fn wait_for_plugin(plugin_id: &str) -> Result<(), String> {
     let needle = format!("\"id\":\"{plugin_id}\"");
     for _ in 0..40 {
@@ -278,14 +315,7 @@ pub fn setup() -> Result<(), String> {
             .arg(&source),
     )?;
 
-    let policy = paths::pam_policy_source();
-    if !policy.is_file() {
-        return Err(format!(
-            "PAM policy template is missing at {}; set OPU_DATADIR or reinstall the package",
-            policy.display()
-        ));
-    }
-    install_policy(&policy)?;
+    policy_installed()?;
     install_binding()?;
     install_plugin(&source, &plugin_dir()?)?;
 
@@ -296,6 +326,11 @@ pub fn setup() -> Result<(), String> {
     super::run(Command::new("omarchy").args(["plugin", "enable", STOCK_PLUGIN_ID]))?;
     remove_obsolete_update_hook()?;
     reload_hyprland()?;
+    // After enabling, so a first install does not restart a shell that is
+    // about to load the plugin anyway.
+    if let Err(error) = reload_plugin_code(&source) {
+        eprintln!("warning: could not reload the Omarchy shell: {error}");
+    }
     if let Err(error) = enable_service() {
         eprintln!("warning: could not arm the presence service: {error}");
     }

@@ -39,12 +39,6 @@ pub fn datadir() -> PathBuf {
     env::var_os("OPU_DATADIR").map_or_else(|| PathBuf::from(DEFAULT_DATADIR), PathBuf::from)
 }
 
-/// The PAM policy template shipped by packaging.
-#[must_use]
-pub fn pam_policy_source() -> PathBuf {
-    datadir().join("omarchy-lock-presence.pam")
-}
-
 /// The self-contained Omarchy service plugin shipped by packaging.
 #[must_use]
 pub fn shell_plugin_source() -> PathBuf {
@@ -112,10 +106,6 @@ mod tests {
         // SAFETY-free: this test only reads when OPU_DATADIR is unset in the harness.
         if env::var_os("OPU_DATADIR").is_none() {
             assert_eq!(datadir(), PathBuf::from(DEFAULT_DATADIR));
-            assert_eq!(
-                pam_policy_source(),
-                PathBuf::from(DEFAULT_DATADIR).join("omarchy-lock-presence.pam")
-            );
             assert_eq!(
                 shell_plugin_source(),
                 PathBuf::from(DEFAULT_DATADIR).join("plugin")

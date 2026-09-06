@@ -29,15 +29,18 @@ pub enum Enrollment {
     Forget,
 }
 
-/// Files the installer wrote outside this user's home, which only root can
-/// remove and which a package manager may own.
-const SYSTEM_FILES: [&str; 6] = [
+/// Files installed outside this user's home, which only root can remove and
+/// which a package manager may own. The PAM policy is among them: it belongs
+/// to whatever installed the module it names, so removal reports it rather
+/// than deleting a file `pacman` believes it owns.
+const SYSTEM_FILES: [&str; 7] = [
     "/usr/bin/omarchy-presence-unlock",
     "/usr/bin/presenced",
     "/usr/lib/security/pam_omarchy_presence_unlock.so",
     "/usr/lib/systemd/user/presenced.service",
     "/usr/lib/systemd/user/presenced.path",
     "/usr/share/omarchy-presence-unlock",
+    quattro::PAM_POLICY,
 ];
 
 fn step(label: impl Into<String>, outcome: Result<(), String>) -> Step {
@@ -120,13 +123,6 @@ fn remove_socket() -> Result<(), String> {
     remove_if_present(&paths::current_socket_dir())
 }
 
-fn remove_policy() -> Result<(), String> {
-    if !Path::new(quattro::PAM_POLICY).exists() {
-        return Ok(());
-    }
-    super::run(Command::new("sudo").args(["rm", "-f", quattro::PAM_POLICY]))
-}
-
 fn forget_enrollment() -> Result<(), String> {
     let config = paths::config_path().ok_or("XDG_CONFIG_HOME or HOME is required")?;
     remove_if_present(&config)
@@ -180,10 +176,6 @@ pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
         stop_service(),
     ));
     steps.push(step("Removed the control socket", remove_socket()));
-    steps.push(step(
-        format!("Removed the PAM policy {}", quattro::PAM_POLICY),
-        remove_policy(),
-    ));
     steps.push(step(
         "Removed retained state",
         quattro::state_dir().and_then(|path| remove_if_present(&path)),
