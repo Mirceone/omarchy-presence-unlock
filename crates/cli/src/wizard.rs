@@ -22,9 +22,11 @@
 //! device is only located and remembered by address.
 
 use crate::ui::{Frame, Mark, Menu, Screen};
-use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
+use crate::{client, devices, doctor, enrollment, interrupt, pairing, ui};
 use enrollment::{Cleanup, Phase, Progress};
-use omarchy_presence_unlock_protocol::{config::ConfigFile, wire};
+use omarchy_presence_unlock_protocol::{
+    config::ConfigFile, presence::MultiDeviceAuth, profile, wire,
+};
 use std::{
     process::Command,
     sync::{
@@ -256,21 +258,15 @@ fn enrolled_devices() -> Vec<(String, &'static str)> {
         .unwrap_or_default()
 }
 
-/// Which unlock-backend option the config currently holds.
-fn current_backend() -> Option<usize> {
-    match ConfigFile::load().ok()?.unlock_backend.as_str() {
-        "quattro" => Some(0),
-        "process-signal" => Some(1),
-        "command" => Some(2),
-        "disabled" => Some(3),
-        _ => None,
-    }
-}
-
-/// Which quorum option is in force. A loaded config with no `quorum` key runs
-/// the documented `any` default; no config at all marks nothing.
-fn current_quorum() -> Option<usize> {
-    match ConfigFile::load().ok()?.quorum.as_deref().unwrap_or("any") {
+/// Which multi-device authentication option is in force. A loaded config with
+/// no explicit rule uses the documented `any` default.
+fn current_multi_device_auth() -> Option<usize> {
+    match ConfigFile::load()
+        .ok()?
+        .multi_device_auth
+        .as_deref()
+        .unwrap_or("any")
+    {
         "any" => Some(0),
         "all" => Some(1),
         expression if expression.starts_with("at-least:") => Some(2),
@@ -278,14 +274,9 @@ fn current_quorum() -> Option<usize> {
     }
 }
 
-/// Whether anything is wired up to actually release the lock screen. An
-/// enrollment that reports success while nothing can act on it would be a lie
-/// of omission, so every success screen states this.
+/// The supported lock screen is selected automatically.
 fn unlock_state() -> &'static str {
-    match ConfigFile::load() {
-        Ok(config) if config.unlock_backend != "disabled" => "Ready",
-        _ => "No unlock backend set",
-    }
+    "Omarchy Quattro (automatic)"
 }
 
 /// The adapter the daemon watches, which is the one an enrollment or a scan
@@ -344,62 +335,6 @@ fn prime_sudo(screen: &Screen, title: &str, step: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Derives a usable device id from an advertised name, so picking a device
-/// and pressing Enter is the whole flow. Anything that is not alphanumeric
-/// collapses to a single dash.
-fn slug(alias: &str) -> Option<String> {
-    let mut out = String::with_capacity(alias.len());
-    for character in alias.chars() {
-        if character.is_ascii_alphanumeric() {
-            out.push(character.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-');
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-/// The device id is the config's primary key, not a label: `add` upserts on
-/// it, `status` prints it, and removal addresses devices by it. It is the
-/// app's to choose — the user is never asked.
-///
-/// An entry already holding this address keeps its id, because that is the
-/// same hardware being re-registered rather than a new device. Otherwise the
-/// advertised name provides the id, falling back to the address, and a
-/// numeric suffix is appended until it is unique so enrolling something new
-/// can never silently replace something enrolled.
-fn device_id(alias: Option<&str>, address: Option<&str>) -> String {
-    let entries = ConfigFile::load()
-        .map(|config| config.devices)
-        .unwrap_or_default();
-    if let Some(address) = address
-        && let Some(existing) = entries.iter().find(|entry| {
-            entry
-                .address
-                .as_deref()
-                .is_some_and(|known| known.eq_ignore_ascii_case(address))
-        })
-    {
-        return existing.id.clone();
-    }
-
-    let taken: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-    let base = alias
-        .and_then(slug)
-        .or_else(|| address.and_then(slug))
-        .unwrap_or_else(|| "device".to_string());
-    if !taken.contains(&base.as_str()) {
-        return base;
-    }
-    // N enrolled ids can block at most N of the N+1 candidates in this range,
-    // so one is always free and the fallback is unreachable.
-    (2..=taken.len() + 2)
-        .map(|suffix| format!("{base}-{suffix}"))
-        .find(|candidate| !taken.contains(&candidate.as_str()))
-        .unwrap_or(base)
-}
-
 /// A screen with nothing to choose, shown until it is dismissed.
 fn show(screen: &Screen, frame: Frame) -> Result<(), String> {
     let mut frame = frame;
@@ -441,6 +376,9 @@ struct PairState {
     reached: Option<Phase>,
     advertising_as: Option<String>,
     device_name: Option<String>,
+    /// The id the enrollment was written under, which only the flow can know:
+    /// it is derived from the name the device reported for itself.
+    enrolled_id: Option<String>,
     cleanup: Vec<Cleanup>,
 }
 
@@ -454,6 +392,14 @@ impl PairState {
                     _ => {}
                 }
                 self.reached = Some(phase);
+            }
+            Progress::Enrolled { id, name } => {
+                self.enrolled_id = Some(id);
+                // The peer only names itself once it has paired, so this is
+                // the first point at which the screen can name it correctly.
+                if name.is_some() {
+                    self.device_name = name;
+                }
             }
             Progress::Cleanup(cleanup) => self.cleanup.push(cleanup),
         }
@@ -533,7 +479,16 @@ fn pair_frame(
         frame.blank();
         frame.line(format!("Time remaining: {}", ui::countdown(remaining)));
     } else {
-        frame.mark(Mark::Done, &format!("{label} connected"));
+        // The device that answered is worth naming: a phone list shows several
+        // candidates, and this is the only confirmation that the one that
+        // connected is the one the user tapped.
+        frame.mark(
+            Mark::Done,
+            &state.device_name.as_ref().map_or_else(
+                || format!("{label} connected"),
+                |name| format!("\u{201c}{name}\u{201d} connected"),
+            ),
+        );
         milestone_tensed(
             &mut frame,
             rank,
@@ -683,7 +638,6 @@ fn pair_instructions(
 fn pair_success_frame(
     screen: &Screen,
     provider: &enrollment::Provider,
-    id: &str,
     state: &PairState,
     daemon: &Result<(), String>,
 ) -> Frame {
@@ -700,7 +654,9 @@ fn pair_success_frame(
     frame.blank();
     frame.line("Device");
     frame.field("Name", state.device_name.as_deref().unwrap_or(label));
-    frame.field("ID", id);
+    // The flow names the enrollment after the device, so the id it reported
+    // is the only correct one to show here.
+    frame.field("ID", state.enrolled_id.as_deref().unwrap_or("\u{2014}"));
     frame.field("Security", provider.profile().label());
     frame.field("Unlock", unlock_state());
     frame
@@ -711,12 +667,11 @@ fn pair_success_frame(
 fn pair_success(
     screen: &Screen,
     provider: &enrollment::Provider,
-    id: &str,
     state: &PairState,
     daemon: &Result<(), String>,
 ) -> Action {
     loop {
-        let head = pair_success_frame(screen, provider, id, state, daemon);
+        let head = pair_success_frame(screen, provider, state, daemon);
         let choice = Menu::new(head, vec!["Done".into(), "View diagnostics".into()])
             .footer(ui::NAV_SELECT)
             .run(screen)?;
@@ -770,14 +725,12 @@ fn pair_failure(
 fn run_pairing(
     screen: &Screen,
     provider: &'static enrollment::Provider,
-    id: &str,
     advertised_as: &str,
 ) -> (PairState, Result<(), String>, bool, Result<(), String>) {
     let state = Arc::new(Mutex::new(PairState::default()));
     let worker_state = Arc::clone(&state);
     let adapter = configured_adapter();
     let provider_id = provider.id();
-    let worker_id = id.to_string();
 
     let pause = DaemonPause::stop();
     let started = Instant::now();
@@ -796,7 +749,7 @@ fn run_pairing(
                 &enrollment::Request {
                     adapter: adapter.as_deref(),
                     timeout_secs: ENROLL_TIMEOUT_SECS,
-                    id: &worker_id,
+                    id: None,
                     save: true,
                     cancel,
                     progress: &sink,
@@ -877,7 +830,6 @@ fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Ac
             );
         }
     };
-    let id = device_id(Some("watch"), None);
 
     loop {
         if !pair_instructions(screen, provider, &advertised_as)? {
@@ -885,7 +837,7 @@ fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Ac
         }
         prime_sudo(screen, &format!("Pair {}", provider.label()), "Step 2 of 3")?;
 
-        let (state, result, cancelled, daemon) = run_pairing(screen, provider, &id, &advertised_as);
+        let (state, result, cancelled, daemon) = run_pairing(screen, provider, &advertised_as);
         // Ctrl+C asked to leave, and the operation has now unwound; the caller
         // returns rather than painting another screen.
         if interrupt::quit_requested() {
@@ -896,7 +848,7 @@ fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Ac
             return Ok(false);
         }
         match result {
-            Ok(()) => return pair_success(screen, provider, &id, &state, &daemon),
+            Ok(()) => return pair_success(screen, provider, &state, &daemon),
             Err(error) => {
                 if !pair_failure(screen, provider, &state, &error, &daemon)? {
                     return Ok(false);
@@ -1204,7 +1156,7 @@ fn find_proximity_device(screen: &Screen) -> Action {
         let candidate = &candidates[choice];
         let name = candidate_name(candidate);
         let address = candidate.address.to_string();
-        let id = device_id(candidate.alias.as_deref(), Some(&address));
+        let id = devices::derive_id(candidate.alias.as_deref(), Some(&address));
         devices::add(
             &id,
             "presence",
@@ -1229,7 +1181,7 @@ fn find_proximity_device(screen: &Screen) -> Action {
 /// The escape hatch for a key obtained elsewhere — from macOS, or from an
 /// earlier `bond-info` — with no pairing involved.
 fn enroll_manual_irk(screen: &Screen) -> Action {
-    let id = device_id(Some("watch"), None);
+    let id = devices::derive_id(Some("watch"), None);
     let mut warning: Option<String> = None;
     loop {
         let mut head = screen.frame();
@@ -1400,93 +1352,10 @@ fn manage_devices(screen: &Screen) -> Action {
     }
 }
 
-/// Pick-one menu: the filled radio is the backend currently in the config,
-/// and the cursor starts there so the live setting is the default answer.
+/// Pick-one menu over the multi-device authentication rule.
 ///
-/// Applying a choice loops rather than returning, so the config is re-read
-/// and the dot moves to what was just picked. The redrawn menu *is* the
-/// confirmation — no message to dismiss. Only `Back`/Esc leaves.
-fn choose_backend(screen: &Screen) -> Action {
-    const OPTIONS: [&str; 4] = [
-        "Omarchy hold Alt for 400ms (recommended)",
-        "Signal another lock screen process",
-        "Run a custom unlock command",
-        "Disable",
-    ];
-    let mut warning: Option<String> = None;
-    loop {
-        let current = current_backend();
-        let mut head = screen.frame();
-        head.title(ui::APP_TITLE, None);
-        head.blank();
-        head.line("Choose what releases the lock screen");
-        if let Some(warning) = &warning {
-            head.blank();
-            head.warn(warning);
-        }
-
-        let mut items = radios(OPTIONS.iter().map(|option| (*option).to_string()), current);
-        items.push(aligned("Back"));
-        let back = items.len() - 1;
-
-        let Some(choice) = Menu::new(head.clone(), items)
-            .selected(current.unwrap_or(0))
-            .run(screen)?
-        else {
-            return Ok(false);
-        };
-        if choice == back {
-            return Ok(false);
-        }
-        match choice {
-            0 => devices::set_backend("quattro", None, None, &[])?,
-            1 => {
-                let Some(process) = ui::input(
-                    screen,
-                    &head,
-                    "Process name (matched against /proc/<pid>/comm): ",
-                    false,
-                )?
-                else {
-                    continue;
-                };
-                devices::set_backend("process-signal", Some(process.trim()), None, &[])?;
-            }
-            2 => {
-                let Some(command) = ui::input(
-                    screen,
-                    &head,
-                    "Command, e.g. sh -c 'loginctl unlock-session': ",
-                    false,
-                )?
-                else {
-                    continue;
-                };
-                match shell_words::split(&command) {
-                    Ok(argv) if !argv.is_empty() => {
-                        devices::set_backend("command", None, None, &argv)?;
-                    }
-                    Ok(_) => {
-                        warning = Some("A command is required.".to_string());
-                        continue;
-                    }
-                    Err(error) => {
-                        warning = Some(format!("Could not parse the command: {error}"));
-                        continue;
-                    }
-                }
-            }
-            3 => devices::set_backend("disabled", None, None, &[])?,
-            _ => unreachable!("index {choice} is past the option list"),
-        }
-        warning = reload_daemon().err();
-    }
-}
-
-/// Pick-one menu over the quorum expression, with the configured value
-/// marked. `at-least:<n>` matches on its prefix, whatever the count.
-/// Updates in place exactly as [`choose_backend`] does.
-fn choose_quorum(screen: &Screen) -> Action {
+/// Applying a choice redraws the menu so the selected rule remains visible.
+fn choose_multi_device_auth(screen: &Screen) -> Action {
     const OPTIONS: [&str; 3] = [
         "Any single enrolled device is enough (default)",
         "Every enrolled device must be present",
@@ -1494,11 +1363,11 @@ fn choose_quorum(screen: &Screen) -> Action {
     ];
     let mut warning: Option<String> = None;
     loop {
-        let current = current_quorum();
+        let current = current_multi_device_auth();
         let mut head = screen.frame();
         head.title(ui::APP_TITLE, None);
         head.blank();
-        head.line("Decide how many enrolled devices must be present");
+        head.line("Choose how many enrolled devices must be nearby to authorize unlock");
         if let Some(warning) = &warning {
             head.blank();
             head.warn(warning);
@@ -1528,7 +1397,7 @@ fn choose_quorum(screen: &Screen) -> Action {
             }
             _ => unreachable!("index {choice} is past the option list"),
         };
-        if let Err(error) = devices::set_quorum(&expression) {
+        if let Err(error) = devices::set_multi_device_auth(&expression) {
             warning = Some(ui::sentence(&error));
             continue;
         }
@@ -1536,34 +1405,245 @@ fn choose_quorum(screen: &Screen) -> Action {
     }
 }
 
-/// Runs `doctor` and shows exactly what it printed. Its output is arbitrary
-/// length, so it goes below a painted header rather than into a frame.
-fn diagnostics(screen: &Screen) -> Result<(), String> {
-    let mut head = screen.frame();
-    head.title("Diagnostics", None);
-    head.blank();
-    screen.draw_above_output(&head)?;
-    if let Err(error) = doctor::doctor() {
-        println!("{}", console::style(ui::sentence(&error)).yellow());
+/// Paints `doctor`'s checks as a checklist, in the same shape as every other
+/// screen. The checks are values, so this frame is built rather than printed.
+fn diagnostics_frame(screen: &Screen, checks: &[doctor::Check]) -> Frame {
+    let mut frame = screen.frame();
+    frame.title("Diagnostics", None);
+    frame.blank();
+    if checks.is_empty() {
+        frame.line("Nothing could be checked.");
+        return frame;
     }
-    println!("\n{}", console::style(ui::NAV_RETURN).dim());
-    ui::wait_for_dismiss(screen)
+    for check in checks {
+        frame.mark(
+            if check.ok { Mark::Done } else { Mark::Failed },
+            &ui::sentence(&check.label),
+        );
+    }
+    // A failure is the last check by construction, so the advice belongs here.
+    if checks.iter().any(|check| !check.ok) {
+        frame.blank();
+        frame.dim("Fix the failure above, then run diagnostics again.");
+    }
+    frame
 }
 
-/// Same shape as [`diagnostics`]: a header, then whatever the installer says.
-fn install_integration(screen: &Screen) -> Action {
-    let mut head = screen.frame();
-    head.title("Install lock-screen integration", None);
-    head.blank();
-    screen.draw_above_output(&head)?;
-    let result = setup::setup_omarchy();
-    if let Err(error) = &result {
-        println!("{}", console::style(ui::sentence(error)).yellow());
+fn diagnostics(screen: &Screen) -> Result<(), String> {
+    let frame = diagnostics_frame(screen, &doctor::report());
+    show(screen, frame)
+}
+
+/// The configured authentication requirement, retained with the number of
+/// enrolled devices so the status screen can explain an incomplete quorum.
+#[derive(Clone, Copy)]
+enum LiveStatusRule {
+    Any { enrolled: usize },
+    All { enrolled: usize },
+    AtLeast { required: usize, enrolled: usize },
+    Unavailable,
+}
+
+impl LiveStatusRule {
+    fn from_config() -> Self {
+        let Some(settings) = ConfigFile::load()
+            .ok()
+            .and_then(|config| config.resolve().ok())
+        else {
+            return Self::Unavailable;
+        };
+        let enrolled = settings.devices.len();
+        match settings.multi_device_auth {
+            MultiDeviceAuth::Any => Self::Any { enrolled },
+            MultiDeviceAuth::All => Self::All { enrolled },
+            MultiDeviceAuth::AtLeast(required) => Self::AtLeast {
+                required: usize::from(required).min(enrolled).max(1),
+                enrolled,
+            },
+        }
     }
-    println!("\n{}", console::style(ui::NAV_RETURN).dim());
-    ui::wait_for_dismiss(screen)?;
-    // Already reported on screen; the menu has nothing left to say about it.
-    Ok(false)
+
+    fn required(self, reported: usize) -> usize {
+        match self {
+            Self::Any { .. } => 1,
+            Self::All { enrolled } => enrolled,
+            Self::AtLeast { required, .. } => required,
+            Self::Unavailable => reported.max(1),
+        }
+    }
+
+    /// A one-device setup is the common case, and "all 1 enrolled devices"
+    /// reads as a bug, so the singular is spelled out rather than counted.
+    fn description(self) -> String {
+        match self {
+            Self::Any { enrolled } | Self::All { enrolled } if enrolled == 1 => {
+                "Rule: the only enrolled device must authorize an unlock".into()
+            }
+            Self::Any { enrolled } => {
+                format!("Rule: any 1 of {enrolled} enrolled devices may authorize an unlock")
+            }
+            Self::All { enrolled } => {
+                format!("Rule: all {enrolled} enrolled devices must authorize an unlock")
+            }
+            Self::AtLeast { required, enrolled } => format!(
+                "Rule: at least {required} of {enrolled} enrolled devices must authorize an unlock"
+            ),
+            Self::Unavailable => "Rule: unable to read the configured device rule".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LiveStatusTone {
+    Green,
+    Amber,
+    Red,
+}
+
+fn tinted_status(text: String, tone: LiveStatusTone) -> String {
+    match tone {
+        LiveStatusTone::Green => console::style(text).green().to_string(),
+        LiveStatusTone::Amber => console::style(text).yellow().to_string(),
+        LiveStatusTone::Red => console::style(text).red().to_string(),
+    }
+}
+
+/// The profile's user-facing label, falling back to the wire id so an
+/// unrecognised profile still identifies itself rather than vanishing.
+fn profile_label(profile_id: &str) -> &'static str {
+    profile::find(profile_id).map_or("Unknown profile", |profile| profile.label())
+}
+
+fn device_status_words(row: &wire::DeviceRow<'_>) -> (&'static str, LiveStatusTone) {
+    if row.allowed {
+        return ("Near", LiveStatusTone::Green);
+    }
+    match row.reason {
+        Some(wire::DENY_DEVICE_LOCKED) => (
+            "Locked — unlock it or enable auto-unlock",
+            LiveStatusTone::Amber,
+        ),
+        Some("insufficient-samples") => ("Still confirming", LiveStatusTone::Amber),
+        Some("multi-device-auth") => ("Near — more devices required", LiveStatusTone::Amber),
+        Some("stale") => ("Last heard too long ago", LiveStatusTone::Red),
+        Some("no-device") => ("Not seen", LiveStatusTone::Red),
+        _ => ("Unavailable", LiveStatusTone::Red),
+    }
+}
+
+fn live_status_frame(
+    screen: &Screen,
+    rows: &[wire::DeviceRow<'_>],
+    decision: Option<wire::Aggregate<'_>>,
+    rule: LiveStatusRule,
+) -> Frame {
+    let mut frame = screen.frame();
+    frame.title("Live status", None);
+    frame.blank();
+
+    let near = rows.iter().filter(|row| row.allowed).count();
+    let (headline, tone) = match decision {
+        Some(wire::Aggregate::Allow) => (
+            "Unlock authorized — a presence unlock would succeed now.".into(),
+            LiveStatusTone::Green,
+        ),
+        // Amber is for an obstacle the user can clear from where they are
+        // standing: enough devices exist, they are just not all near, or one
+        // is near but refusing.
+        Some(wire::Aggregate::Deny(wire::DENY_MULTI_DEVICE_AUTH)) => (
+            format!(
+                "Not authorized — {near} of {} required devices near.",
+                rule.required(rows.len())
+            ),
+            LiveStatusTone::Amber,
+        ),
+        Some(wire::Aggregate::Deny(wire::DENY_DEVICE_LOCKED)) => (
+            "Not authorized — a device is near but locked.".into(),
+            LiveStatusTone::Amber,
+        ),
+        Some(wire::Aggregate::Deny(wire::DENY_INSUFFICIENT_SAMPLES)) => (
+            "Not authorized — still confirming a nearby device.".into(),
+            LiveStatusTone::Amber,
+        ),
+        Some(wire::Aggregate::Deny(wire::DENY_STALE)) => (
+            "Not authorized — no device heard from recently enough.".into(),
+            LiveStatusTone::Red,
+        ),
+        Some(wire::Aggregate::Deny(wire::DENY_NO_DEVICE)) => (
+            "Not authorized — no enrolled device in range.".into(),
+            LiveStatusTone::Red,
+        ),
+        Some(wire::Aggregate::Deny(reason)) => {
+            (format!("Not authorized — {reason}."), LiveStatusTone::Red)
+        }
+        None => (
+            "The unlock service returned an unusable status.".into(),
+            LiveStatusTone::Red,
+        ),
+    };
+    frame.line(tinted_status(headline, tone));
+    frame.dim(&rule.description());
+
+    if !rows.is_empty() {
+        frame.blank();
+        frame.dim("  Device               Profile              Status                              Signal");
+        for row in rows {
+            let (state, row_tone) = device_status_words(row);
+            let signal = row.rssi.map_or_else(|| "—".into(), dbm);
+            frame.line(tinted_status(
+                format!(
+                    "  {:<20} {:<20} {:<35} {signal}",
+                    row.id,
+                    profile_label(row.profile),
+                    state,
+                ),
+                row_tone,
+            ));
+        }
+    }
+    frame.blank();
+    frame.dim("Press any key to return");
+    frame
+}
+
+fn live_status_response_frame(screen: &Screen, lines: &[String], rule: LiveStatusRule) -> Frame {
+    if lines.is_empty() {
+        let mut frame = screen.frame();
+        frame.title("Live status", None);
+        frame.blank();
+        frame.line(tinted_status(
+            "The unlock service did not respond.".into(),
+            LiveStatusTone::Red,
+        ));
+        frame.blank();
+        frame.dim("Press any key to return");
+        return frame;
+    }
+    let rows = lines
+        .iter()
+        .filter_map(|line| wire::parse_device_status(line))
+        .collect::<Vec<_>>();
+    let decision = lines
+        .iter()
+        .rev()
+        .find_map(|line| wire::parse_decision(line).map(|parsed| (line, parsed)));
+    live_status_frame(screen, &rows, decision.map(|(_, parsed)| parsed), rule)
+}
+
+fn live_status_error_frame(screen: &Screen, error: &str) -> Frame {
+    let mut frame = screen.frame();
+    frame.title("Live status", None);
+    frame.blank();
+    frame.line(tinted_status(
+        format!(
+            "Unable to reach the unlock service: {}",
+            ui::sentence(error)
+        ),
+        LiveStatusTone::Red,
+    ));
+    frame.blank();
+    frame.dim("Press any key to return");
+    frame
 }
 
 /// Refreshes the daemon's per-device and aggregate decision once a second
@@ -1579,20 +1659,11 @@ fn live_status(screen: &Screen) -> Action {
     });
 
     loop {
-        let mut frame = screen.frame();
-        frame.title("Live status", None);
-        frame.blank();
-        match client::request_lines(wire::REQ_STATUS, Duration::from_millis(200)) {
-            Ok(lines) if lines.is_empty() => frame.line("(no response)"),
-            Ok(lines) => {
-                for line in lines {
-                    frame.line(line);
-                }
-            }
-            Err(error) => frame.warn(&ui::sentence(&error)),
-        }
-        frame.blank();
-        frame.dim("Press any key to return");
+        let rule = LiveStatusRule::from_config();
+        let frame = match client::request_lines(wire::REQ_STATUS, Duration::from_millis(200)) {
+            Ok(lines) => live_status_response_frame(screen, &lines, rule),
+            Err(error) => live_status_error_frame(screen, &error),
+        };
         screen.draw(&frame)?;
         if rx.recv_timeout(Duration::from_secs(1)).is_ok() {
             return Ok(false);
@@ -1600,12 +1671,13 @@ fn live_status(screen: &Screen) -> Action {
     }
 }
 
-const MAIN_MENU: [&str; 8] = [
+/// The setup command owns the lock-screen integration: it is applied by the
+/// installer and re-applied by `setup-omarchy`, so offering it here only
+/// invited a user to install what is already installed.
+const MAIN_MENU: [&str; 6] = [
     "Enroll a device",
     "Manage enrolled devices",
-    "Choose unlock backend",
-    "Set quorum",
-    "Install lock-screen integration",
+    "Multi-device authentication",
     "Run diagnostics",
     "View live status",
     "Exit",
@@ -1646,10 +1718,8 @@ pub fn run() -> Result<(), String> {
         let result = match choice {
             0 => enroll_menu(&screen),
             1 => manage_devices(&screen),
-            2 => choose_backend(&screen),
-            3 => choose_quorum(&screen),
-            4 => install_integration(&screen),
-            5 => diagnostics(&screen).map(|()| false),
+            2 => choose_multi_device_auth(&screen),
+            3 => diagnostics(&screen).map(|()| false),
             _ => live_status(&screen),
         };
         // Ctrl+C during the action asked to leave, and the action has now
@@ -1765,17 +1835,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ids_are_derived_from_a_name_and_are_config_safe() {
-        assert_eq!(slug("Pixel 10 Pro").as_deref(), Some("pixel-10-pro"));
-        assert_eq!(
-            slug("Mi Smart Band 8!!").as_deref(),
-            Some("mi-smart-band-8")
-        );
-        assert_eq!(slug("---").as_deref(), None);
-        assert_eq!(slug("").as_deref(), None);
-    }
-
     /// Everything below the title and above the key legend, which is the part
     /// a mockup pins down.
     fn body(frame: &Frame) -> Vec<String> {
@@ -1857,6 +1916,28 @@ mod tests {
                 "  ✓ Device identity received",
                 "  ◉ Verifying enrollment…",
             ]
+        );
+    }
+
+    /// A phone's Bluetooth screen can list several candidates, so once one
+    /// connects the checklist has to confirm which one it was.
+    #[test]
+    fn the_checklist_names_the_device_that_connected() {
+        let screen = Screen::new();
+        let state = at_phase(&[Phase::Connected(Some("Mirceone\u{2019}s iPhone".into()))]);
+        let lines = pair_frame(
+            &screen,
+            enrollment::PROVIDERS[0],
+            &state,
+            "mirceone-framework",
+            Duration::from_secs(60),
+        )
+        .plain();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{201c}Mirceone\u{2019}s iPhone\u{201d} connected")),
+            "the connected row must name the device: {lines:?}"
         );
     }
 
@@ -1956,9 +2037,12 @@ mod tests {
     #[test]
     fn the_success_screen_describes_the_device_that_was_enrolled() {
         let screen = Screen::new();
-        let state = at_phase(&[Phase::Connected(Some("Apple Watch".into()))]);
-        let lines =
-            pair_success_frame(&screen, enrollment::PROVIDERS[0], "watch", &state, &Ok(())).plain();
+        let mut state = at_phase(&[Phase::Connected(Some("Apple Watch".into()))]);
+        state.apply(Progress::Enrolled {
+            id: "apple-watch".into(),
+            name: None,
+        });
+        let lines = pair_success_frame(&screen, enrollment::PROVIDERS[0], &state, &Ok(())).plain();
         assert!(lines[0].starts_with("Apple Watch enrolled"));
         assert!(lines[0].ends_with("Step 3 of 3"));
         assert_eq!(
@@ -1972,7 +2056,7 @@ mod tests {
             ]
         );
         assert_eq!(lines[7], "  Name       Apple Watch");
-        assert_eq!(lines[8], "  ID         watch");
+        assert_eq!(lines[8], "  ID         apple-watch");
         assert_eq!(lines[9], "  Security   Apple Continuity");
     }
 
@@ -1996,6 +2080,217 @@ mod tests {
                 "",
                 "This device does not report whether it is itself unlocked.",
             ]
+        );
+    }
+
+    fn status_row(
+        id: &'static str,
+        profile: &'static str,
+        allowed: bool,
+        reason: Option<&'static str>,
+        rssi: Option<i16>,
+    ) -> wire::DeviceRow<'static> {
+        wire::DeviceRow {
+            id,
+            profile,
+            allowed,
+            reason,
+            rssi,
+        }
+    }
+
+    #[test]
+    fn live_status_says_an_unlock_would_succeed_when_authorized() {
+        let screen = Screen::new();
+        let rows = [status_row(
+            "watch",
+            "apple-continuity",
+            true,
+            None,
+            Some(-54),
+        )];
+        let lines = live_status_frame(
+            &screen,
+            &rows,
+            Some(wire::Aggregate::Allow),
+            LiveStatusRule::Any { enrolled: 1 },
+        )
+        .plain();
+
+        assert!(
+            lines.iter().any(|line| line.contains("Unlock authorized")),
+            "authorized status must be immediately understandable: {lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("watch")));
+        assert!(lines.iter().any(|line| line.contains("−54 dBm")));
+    }
+
+    #[test]
+    fn live_status_explains_an_incomplete_multi_device_quorum() {
+        let screen = Screen::new();
+        let rows = [
+            status_row("watch", "apple-continuity", true, None, Some(-54)),
+            status_row("phone", "presence", false, Some("no-device"), None),
+        ];
+        let lines = live_status_frame(
+            &screen,
+            &rows,
+            Some(wire::Aggregate::Deny(wire::DENY_MULTI_DEVICE_AUTH)),
+            LiveStatusRule::All { enrolled: 2 },
+        )
+        .plain();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1 of 2 required devices near")),
+            "the incomplete quorum must name both counts: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("all 2 enrolled devices")),
+            "the active rule must explain why one device is insufficient: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn live_status_explains_when_a_nearby_watch_is_locked() {
+        let screen = Screen::new();
+        let rows = [status_row(
+            "watch",
+            "apple-continuity",
+            false,
+            Some(wire::DENY_DEVICE_LOCKED),
+            Some(-54),
+        )];
+        let lines = live_status_frame(
+            &screen,
+            &rows,
+            Some(wire::Aggregate::Deny(wire::DENY_DEVICE_LOCKED)),
+            LiveStatusRule::Any { enrolled: 1 },
+        )
+        .plain();
+
+        assert!(
+            lines.iter().any(|line| line.contains("near but locked")),
+            "the headline must identify the actionable Watch state: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Locked — unlock it or enable auto-unlock")),
+            "the device row must say how to resolve the refusal: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn live_status_says_when_no_enrolled_device_is_in_range() {
+        let screen = Screen::new();
+        let rows = [status_row(
+            "watch",
+            "apple-continuity",
+            false,
+            Some("no-device"),
+            None,
+        )];
+        let lines = live_status_frame(
+            &screen,
+            &rows,
+            Some(wire::Aggregate::Deny(wire::DENY_NO_DEVICE)),
+            LiveStatusRule::Any { enrolled: 1 },
+        )
+        .plain();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("no enrolled device in range")),
+            "the blocked state must name the absence: {lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("Not seen")));
+    }
+
+    #[test]
+    fn live_status_keeps_known_signal_and_uses_a_placeholder_for_unknown_signal() {
+        let screen = Screen::new();
+        let rows = [
+            status_row("watch", "apple-continuity", true, None, Some(-54)),
+            status_row("phone", "presence", false, Some("no-device"), None),
+        ];
+        let lines = live_status_frame(
+            &screen,
+            &rows,
+            Some(wire::Aggregate::Allow),
+            LiveStatusRule::Any { enrolled: 2 },
+        )
+        .plain();
+
+        let watch = lines
+            .iter()
+            .find(|line| line.contains("watch"))
+            .expect("the Watch row must be rendered");
+        let phone = lines
+            .iter()
+            .find(|line| line.contains("phone"))
+            .expect("the phone row must be rendered");
+        assert!(watch.contains("−54 dBm"));
+        assert!(
+            phone.ends_with("—"),
+            "unknown RSSI must not look like zero: {phone}"
+        );
+    }
+
+    /// A one-device setup is the common case, so its rule must not read like
+    /// a formatting bug.
+    #[test]
+    fn the_active_rule_reads_correctly_for_one_and_for_several_devices() {
+        assert_eq!(
+            LiveStatusRule::All { enrolled: 1 }.description(),
+            "Rule: the only enrolled device must authorize an unlock"
+        );
+        assert!(
+            LiveStatusRule::All { enrolled: 2 }
+                .description()
+                .contains("all 2 enrolled devices")
+        );
+        assert!(
+            LiveStatusRule::AtLeast {
+                required: 2,
+                enrolled: 3
+            }
+            .description()
+            .contains("at least 2 of 3")
+        );
+    }
+
+    /// Diagnostics is the screen a user opens when something is wrong, so a
+    /// failure has to be the row that stands out rather than trailing text.
+    #[test]
+    fn diagnostics_marks_each_check_and_singles_out_a_failure() {
+        let screen = Screen::new();
+        let lines = diagnostics_frame(
+            &screen,
+            &[
+                doctor::Check {
+                    ok: true,
+                    label: "presence PAM policy /etc/pam.d/omarchy-lock-presence".into(),
+                },
+                doctor::Check {
+                    ok: false,
+                    label: "presenced socket is absent".into(),
+                },
+            ],
+        )
+        .plain();
+        assert_eq!(lines[0], "Diagnostics");
+        assert!(lines[2].starts_with("  ✓"), "passing row: {:?}", lines[2]);
+        assert!(lines[3].starts_with("  ✗"), "failing row: {:?}", lines[3]);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("run diagnostics again")),
+            "a failure must say what to do next: {lines:?}"
         );
     }
 }
