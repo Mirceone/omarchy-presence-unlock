@@ -96,16 +96,28 @@ fn remove_binding() -> Result<(), String> {
     crate::atomic::write_atomic(&path, &format!("{trimmed}\n"), 0o644)
 }
 
+/// Disables both units and stops what they started.
+///
+/// `disable --now` removes the enable symlinks under
+/// `~/.config/systemd/user/`, which is the part of the service this user owns;
+/// the unit files themselves live under `/usr` and are reported instead.
+///
+/// The path unit goes first and on its own: it starts the service whenever a
+/// config appears, so disabling both in one invocation makes systemd warn that
+/// it is stopping a service whose trigger is still armed.
 fn stop_service() -> Result<(), String> {
-    // The path unit starts the service when a config appears, so it has to go
-    // first or stopping the service invites it straight back.
-    super::run(Command::new("systemctl").args([
-        "--user",
-        "disable",
-        "--now",
-        "presenced.path",
-        "presenced.service",
-    ]))
+    super::run(Command::new("systemctl").args(["--user", "disable", "--now", "presenced.path"]))?;
+    super::run(Command::new("systemctl").args(["--user", "disable", "--now", "presenced.service"]))
+}
+
+/// Removes the runtime socket directory the daemon served from.
+///
+/// Stopping the daemon leaves the socket behind until the next reboot, and a
+/// socket nobody serves is worse than none: the PAM module finds a path that
+/// passes its ownership checks and then fails to connect, so a stale one turns
+/// a removed feature into a connection error on every lock screen.
+fn remove_socket() -> Result<(), String> {
+    remove_if_present(&paths::current_socket_dir())
 }
 
 fn remove_policy() -> Result<(), String> {
@@ -163,7 +175,11 @@ pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
     ));
     steps.push(step("Removed the Alt unlock binding", remove_binding()));
     steps.push(step("Reloaded Hyprland", quattro::reload_hyprland()));
-    steps.push(step("Stopped the presence service", stop_service()));
+    steps.push(step(
+        "Disabled and stopped the presence service",
+        stop_service(),
+    ));
+    steps.push(step("Removed the control socket", remove_socket()));
     steps.push(step(
         format!("Removed the PAM policy {}", quattro::PAM_POLICY),
         remove_policy(),
