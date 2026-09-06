@@ -55,7 +55,7 @@ pub fn parse_bluez_info_irk(info: &str) -> Result<[u8; 16], BluezIrkError> {
             return Err(BluezIrkError::Malformed);
         }
         let mut irk = [0_u8; 16];
-        for (slot, pair) in irk.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        for (slot, pair) in irk.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
             let text = std::str::from_utf8(pair).map_err(|_| BluezIrkError::Malformed)?;
             *slot = u8::from_str_radix(text, 16).map_err(|_| BluezIrkError::Malformed)?;
         }

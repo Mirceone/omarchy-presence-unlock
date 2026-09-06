@@ -1,4 +1,4 @@
-//! Presence policy: per-device evidence, and the quorum over a fleet of devices.
+//! Presence policy: per-device evidence and multi-device authentication.
 
 use crate::{
     ble::{Advertisement, Needs},
@@ -41,13 +41,16 @@ impl Decision {
     /// How close this outcome is to authorising, lowest first.
     ///
     /// A fleet reports the reason of its closest device, so a user staring at
-    /// `status` sees the obstacle that actually matters.
+    /// `status` sees the obstacle that actually matters. Fresh but incomplete
+    /// evidence ranks ahead of a locked device; a locked device ranks ahead of
+    /// absence because unlocking it is actionable. Other denials are last.
     fn rank(self) -> u8 {
         match self {
             Self::Allow => 0,
             Self::Deny(wire::DENY_INSUFFICIENT_SAMPLES) => 1,
             Self::Deny(wire::DENY_STALE) => 2,
-            Self::Deny(_) => 3,
+            Self::Deny(wire::DENY_DEVICE_LOCKED) => 3,
+            Self::Deny(_) => 4,
         }
     }
 }
@@ -61,14 +64,20 @@ const MIN_SAMPLE_SPACING_MS: u64 = 50;
 pub struct Eligibility {
     qualifying_samples: Vec<u64>,
     last_qualifying_ms: Option<u64>,
+    last_revocation_ms: Option<u64>,
     last_rssi: Option<i16>,
 }
 
 impl Eligibility {
     pub fn invalidate(&mut self) {
+        self.invalidate_evidence();
+        self.last_revocation_ms = None;
+        self.last_rssi = None;
+    }
+
+    fn invalidate_evidence(&mut self) {
         self.qualifying_samples.clear();
         self.last_qualifying_ms = None;
-        self.last_rssi = None;
     }
 
     /// Most recent RSSI seen from this device, qualifying or not. Diagnostic only.
@@ -87,15 +96,16 @@ impl Eligibility {
     /// lets ordinary RF fading deny a device that is right there. Absence expires
     /// through `sample_window_ms` and `freshness_ms` instead.
     pub fn observe(&mut self, now_ms: u64, rssi: i16, observation: Observation, policy: Policy) {
+        self.last_rssi = Some(rssi);
         match observation {
             Observation::Revoke => {
-                self.invalidate();
+                self.invalidate_evidence();
+                self.last_revocation_ms = Some(now_ms);
                 return;
             }
             Observation::Ignore => return,
-            Observation::Qualify => {}
+            Observation::Qualify => self.last_revocation_ms = None,
         }
-        self.last_rssi = Some(rssi);
         self.qualifying_samples
             .retain(|sample| now_ms.saturating_sub(*sample) <= policy.sample_window_ms);
         if rssi < policy.threshold_dbm {
@@ -119,6 +129,12 @@ impl Eligibility {
     #[must_use]
     pub fn check(&self, now_ms: u64, policy: Policy) -> Decision {
         let Some(last) = self.last_qualifying_ms else {
+            if self
+                .last_revocation_ms
+                .is_some_and(|last| now_ms.saturating_sub(last) <= policy.freshness_ms)
+            {
+                return Decision::Deny(wire::DENY_DEVICE_LOCKED);
+            }
             return Decision::Deny(wire::DENY_NO_DEVICE);
         };
         if now_ms.saturating_sub(last) > policy.freshness_ms {
@@ -166,19 +182,19 @@ impl Device {
     }
 }
 
-/// How many devices must be eligible before the fleet authorises.
+/// How many enrolled devices must be eligible before presence authentication succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Quorum {
+pub enum MultiDeviceAuth {
     /// Any single device suffices. The default, and what a single-device setup wants.
     #[default]
     Any,
-    /// Every configured device must be present. Two-factor by proximity.
+    /// Every configured device must be present.
     All,
     /// At least `n` devices must be present.
     AtLeast(u8),
 }
 
-impl Quorum {
+impl MultiDeviceAuth {
     fn required(self, total: usize) -> usize {
         match self {
             Self::Any => 1,
@@ -196,17 +212,17 @@ pub struct DeviceStatus<'a> {
     pub rssi: Option<i16>,
 }
 
-/// Every configured device plus the quorum rule over them.
+/// Every configured device plus the multi-device authentication rule.
 #[derive(Debug)]
 pub struct Fleet {
     devices: Vec<Device>,
-    quorum: Quorum,
+    multi_device_auth: MultiDeviceAuth,
     needs: Needs,
 }
 
 impl Fleet {
     #[must_use]
-    pub fn new(specs: Vec<DeviceSpec>, quorum: Quorum) -> Self {
+    pub fn new(specs: Vec<DeviceSpec>, multi_device_auth: MultiDeviceAuth) -> Self {
         let needs = specs.iter().fold(Needs::nothing(), |needs, spec| {
             needs
                 .union(spec.identity.needs())
@@ -214,7 +230,7 @@ impl Fleet {
         });
         Self {
             devices: specs.into_iter().map(Device::new).collect(),
-            quorum,
+            multi_device_auth,
             needs,
         }
     }
@@ -268,7 +284,7 @@ impl Fleet {
         if self.devices.is_empty() {
             return Decision::Deny(wire::DENY_NO_DEVICE);
         }
-        let required = self.quorum.required(self.devices.len());
+        let required = self.multi_device_auth.required(self.devices.len());
         let mut allowed = 0;
         let mut closest = Decision::Deny(wire::DENY_NO_DEVICE);
         for device in &self.devices {
@@ -283,13 +299,13 @@ impl Fleet {
         if allowed >= required {
             return Decision::Allow;
         }
-        // Some devices qualified but not enough: report the quorum, not a
-        // per-device reason that looks satisfied.
+        // Some devices qualified but not enough: report the multi-device rule,
+        // not a per-device reason that looks satisfied.
         if allowed > 0 {
-            return Decision::Deny(wire::DENY_QUORUM);
+            return Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH);
         }
         match closest {
-            Decision::Allow => Decision::Deny(wire::DENY_QUORUM),
+            Decision::Allow => Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH),
             deny @ Decision::Deny(_) => deny,
         }
     }
@@ -302,17 +318,6 @@ impl Fleet {
             decision: device.check(now_ms),
             rssi: device.last_rssi(),
         })
-    }
-
-    /// Consumes a qualifying authorisation so one set of advertisements can
-    /// release at most one lock screen.
-    pub fn take_authorization(&mut self, now_ms: u64) -> bool {
-        if self.check(now_ms).is_allow() {
-            self.invalidate();
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -372,8 +377,15 @@ mod tests {
         eligibility.observe(500, -70, Observation::Revoke, policy);
         assert_eq!(
             eligibility.check(500, policy),
-            Decision::Deny(wire::DENY_NO_DEVICE)
+            Decision::Deny(wire::DENY_DEVICE_LOCKED)
         );
+    }
+
+    #[test]
+    fn a_locked_watch_that_ages_out_is_treated_as_an_absent_device() {
+        let mut fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::Any);
+        feed_locked(&mut fleet, [1, 2, 3, 4, 5, 6], 500, -70);
+        assert_eq!(fleet.check(3_001), Decision::Deny(wire::DENY_NO_DEVICE));
     }
 
     #[test]
@@ -383,6 +395,7 @@ mod tests {
         qualify(&mut eligibility, 100, -70, policy);
         qualify(&mut eligibility, 400, -70, policy);
         eligibility.observe(450, -70, Observation::Ignore, policy);
+        assert_eq!(eligibility.last_rssi(), Some(-70));
         assert_eq!(eligibility.check(500, policy), Decision::Allow);
     }
 
@@ -433,32 +446,80 @@ mod tests {
         }
     }
 
+    fn feed_locked(fleet: &mut Fleet, address: [u8; 6], now: u64, rssi: i16) {
+        let data = HashMap::from([(
+            apple::COMPANY_ID,
+            vec![
+                0x10,
+                3,
+                0,
+                apple::AUTO_UNLOCK_ENABLED | apple::WATCH_LOCKED,
+                0,
+            ],
+        )]);
+        let advertisement = Advertisement::new(address, rssi).with_manufacturer_data(&data);
+        fleet.observe(now, &advertisement);
+    }
+
     #[test]
     fn an_empty_fleet_denies() {
-        let fleet = Fleet::new(Vec::new(), Quorum::Any);
+        let fleet = Fleet::new(Vec::new(), MultiDeviceAuth::Any);
         assert_eq!(fleet.check(0), Decision::Deny(wire::DENY_NO_DEVICE));
         assert!(!fleet.is_interested(&[1, 2, 3, 4, 5, 6]));
     }
 
     #[test]
-    fn any_quorum_allows_on_one_device() {
-        let mut fleet = Fleet::new(vec![watch_spec("watch"), fob_spec("fob")], Quorum::Any);
+    fn any_device_rule_allows_on_one_device() {
+        let mut fleet = Fleet::new(
+            vec![watch_spec("watch"), fob_spec("fob")],
+            MultiDeviceAuth::Any,
+        );
         feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
         assert_eq!(fleet.check(500), Decision::Allow);
     }
 
     #[test]
-    fn all_quorum_requires_every_device() {
-        let mut fleet = Fleet::new(vec![watch_spec("watch"), fob_spec("fob")], Quorum::All);
+    fn every_device_rule_requires_every_device() {
+        let mut fleet = Fleet::new(
+            vec![watch_spec("watch"), fob_spec("fob")],
+            MultiDeviceAuth::All,
+        );
         feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
-        assert_eq!(fleet.check(500), Decision::Deny(wire::DENY_QUORUM));
+        assert_eq!(
+            fleet.check(500),
+            Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH)
+        );
         feed(&mut fleet, [9, 9, 9, 9, 9, 9], &[100, 400], -60);
         assert_eq!(fleet.check(500), Decision::Allow);
     }
 
     #[test]
+    fn a_locked_watch_reports_its_state_and_rssi_until_it_is_unlocked() {
+        let mut fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::Any);
+        let address = [1, 2, 3, 4, 5, 6];
+        feed_locked(&mut fleet, address, 100, -54);
+        assert_eq!(fleet.check(200), Decision::Deny(wire::DENY_DEVICE_LOCKED));
+        let row = fleet.report(200).next().expect("one configured Watch");
+        assert_eq!(row.decision, Decision::Deny(wire::DENY_DEVICE_LOCKED));
+        assert_eq!(row.rssi, Some(-54));
+
+        feed(&mut fleet, address, &[400, 700], -54);
+        assert_eq!(fleet.check(800), Decision::Allow);
+    }
+
+    #[test]
+    fn a_fleet_with_only_a_locked_watch_reports_device_locked() {
+        let mut fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::Any);
+        feed_locked(&mut fleet, [1, 2, 3, 4, 5, 6], 100, -54);
+        assert_eq!(fleet.check(200), Decision::Deny(wire::DENY_DEVICE_LOCKED));
+    }
+
+    #[test]
     fn a_fleet_reports_the_closest_denial_when_nothing_qualifies() {
-        let mut fleet = Fleet::new(vec![watch_spec("watch"), fob_spec("fob")], Quorum::Any);
+        let mut fleet = Fleet::new(
+            vec![watch_spec("watch"), fob_spec("fob")],
+            MultiDeviceAuth::Any,
+        );
         // One sample only: closer to allowing than the untouched fob's no-device.
         feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100], -60);
         assert_eq!(
@@ -468,16 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn taking_an_authorization_consumes_it() {
-        let mut fleet = Fleet::new(vec![watch_spec("watch")], Quorum::Any);
-        feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
-        assert!(fleet.take_authorization(500));
-        assert!(!fleet.take_authorization(500));
-    }
-
-    #[test]
     fn the_report_carries_one_row_per_configured_device() {
-        let mut fleet = Fleet::new(vec![watch_spec("watch"), fob_spec("fob")], Quorum::Any);
+        let mut fleet = Fleet::new(
+            vec![watch_spec("watch"), fob_spec("fob")],
+            MultiDeviceAuth::Any,
+        );
         feed(&mut fleet, [1, 2, 3, 4, 5, 6], &[100, 400], -60);
         let rows: Vec<_> = fleet.report(500).collect();
         assert_eq!(rows.len(), 2);
@@ -491,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_fleet_is_interested_only_in_configured_addresses() {
-        let fleet = Fleet::new(vec![watch_spec("watch")], Quorum::Any);
+        let fleet = Fleet::new(vec![watch_spec("watch")], MultiDeviceAuth::Any);
         assert!(fleet.is_interested(&[1, 2, 3, 4, 5, 6]));
         assert!(!fleet.is_interested(&[7, 7, 7, 7, 7, 7]));
     }

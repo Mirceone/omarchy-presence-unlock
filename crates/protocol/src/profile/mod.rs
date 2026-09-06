@@ -28,7 +28,6 @@ pub struct Profile {
     /// What this family is called in front of a user. Configuration and
     /// diagnostics use `id`; anything a person reads uses this.
     label: &'static str,
-    aliases: &'static [&'static str],
     needs: Needs,
     attests_device_state: bool,
     evaluate: for<'a> fn(&Advertisement<'a>) -> Observation,
@@ -52,7 +51,6 @@ impl Profile {
     pub(super) const fn new(
         id: &'static str,
         label: &'static str,
-        aliases: &'static [&'static str],
         needs: Needs,
         attests_device_state: bool,
         evaluate: for<'a> fn(&Advertisement<'a>) -> Observation,
@@ -60,7 +58,6 @@ impl Profile {
         Self {
             id,
             label,
-            aliases,
             needs,
             attests_device_state,
             evaluate,
@@ -93,19 +90,15 @@ impl Profile {
     pub fn evaluate(&self, advertisement: &Advertisement<'_>) -> Observation {
         (self.evaluate)(advertisement)
     }
-
-    fn accepts(&self, id: &str) -> bool {
-        self.id == id || self.aliases.contains(&id)
-    }
 }
 
 /// Audited profiles compiled into this release.
 pub static PROFILES: [&Profile; 2] = [&apple_continuity::PROFILE, &presence::PROFILE];
 
-/// Finds a profile by canonical id or a migration alias.
+/// Finds a profile by its canonical id.
 #[must_use]
 pub fn find(id: &str) -> Option<&'static Profile> {
-    PROFILES.iter().copied().find(|profile| profile.accepts(id))
+    PROFILES.iter().copied().find(|profile| profile.id == id)
 }
 
 /// Generic proximity-only BLE profile.
@@ -119,11 +112,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_resolves_canonical_ids_and_migration_aliases() {
+    fn registry_resolves_only_canonical_ids() {
         assert_eq!(find("presence"), Some(PRESENCE));
-        assert_eq!(find("ble"), Some(PRESENCE));
         assert_eq!(find("apple-continuity"), Some(APPLE_CONTINUITY));
-        assert_eq!(find("apple-watch"), Some(APPLE_CONTINUITY));
+        assert_eq!(find("ble"), None);
+        assert_eq!(find("apple-watch"), None);
         assert_eq!(find("unknown"), None);
     }
 

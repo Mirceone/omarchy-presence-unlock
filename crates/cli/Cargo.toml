@@ -18,7 +18,6 @@ nix.workspace = true
 omarchy-presence-unlock-protocol = { path = "../protocol" }
 rpassword.workspace = true
 serde_json.workspace = true
-shell-words.workspace = true
 tokio.workspace = true
 toml_edit.workspace = true
 uuid.workspace = true

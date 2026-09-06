@@ -6,7 +6,7 @@
 //! * [`irk`], [`apple`] — primitives: address resolution, one vendor decoder.
 //! * [`identity`] — "is this advertisement my device?"
 //! * [`profile`] — "what does this device's advertisement assert?"
-//! * [`presence`] — per-device evidence and the quorum over a fleet.
+//! * [`presence`] — per-device evidence and multi-device authentication over a fleet.
 //! * [`config`] — the file format that builds a fleet; [`wire`], [`paths`] — the IPC contract.
 //!
 //! Supporting a new device class touches [`profile`] (and a decoder module) and
@@ -28,6 +28,6 @@ pub use ble::{Advertisement, Needs};
 pub use identity::Identity;
 pub use irk::IrkMatcher;
 pub use presence::{
-    Decision, Device, DeviceSpec, DeviceStatus, Eligibility, Fleet, Policy, Quorum,
+    Decision, Device, DeviceSpec, DeviceStatus, Eligibility, Fleet, MultiDeviceAuth, Policy,
 };
 pub use profile::{Observation, Profile};

@@ -45,6 +45,12 @@ pub fn pam_policy_source() -> PathBuf {
     datadir().join("omarchy-lock-presence.pam")
 }
 
+/// The self-contained Omarchy service plugin shipped by packaging.
+#[must_use]
+pub fn shell_plugin_source() -> PathBuf {
+    datadir().join("plugin")
+}
+
 /// `$XDG_CONFIG_HOME/omarchy-presence-unlock`, else `$HOME/.config/omarchy-presence-unlock`.
 /// `None` when neither variable is set.
 #[must_use]
@@ -109,6 +115,10 @@ mod tests {
             assert_eq!(
                 pam_policy_source(),
                 PathBuf::from(DEFAULT_DATADIR).join("omarchy-lock-presence.pam")
+            );
+            assert_eq!(
+                shell_plugin_source(),
+                PathBuf::from(DEFAULT_DATADIR).join("plugin")
             );
         }
     }

@@ -4,7 +4,6 @@ use crate::ble::{Advertisement, Needs};
 pub(super) static PROFILE: Profile = Profile::new(
     "presence",
     "Proximity only",
-    &["ble"],
     Needs::nothing(),
     false,
     evaluate,

@@ -1,23 +1,20 @@
 //! The daemon: a `BlueZ` scanner, a presence fleet, and a control socket.
 //!
 //! ```text
-//! scan (BlueZ)  ->  Advertisement  ->  Fleet (per-device policy + quorum)
+//! scan (BlueZ)  ->  Advertisement  ->  Fleet (presence policy)
 //!                                          ^
-//!                   control socket  -------+---->  Unlocker (lock screen)
+//!                   control socket  -------+
 //! ```
 //!
-//! Each arrow is a trait or a plain data type, so a transport, a device class,
-//! and a lock screen can each be replaced without touching the other two.
+//! The scanner owns transport concerns while the fleet owns device policy.
 
 pub mod clock;
 pub mod control;
 pub mod scan;
-pub mod unlock;
 
 pub use clock::boottime_ms;
 pub use control::{Service, serve};
 pub use scan::{ScanError, scan};
-pub use unlock::{UnlockError, Unlocker};
 
-pub use omarchy_presence_unlock_protocol::config::{Backend, ConfigError, ConfigFile, Settings};
-pub use omarchy_presence_unlock_protocol::{Fleet, Quorum};
+pub use omarchy_presence_unlock_protocol::config::{ConfigError, ConfigFile, Settings};
+pub use omarchy_presence_unlock_protocol::{Fleet, MultiDeviceAuth};

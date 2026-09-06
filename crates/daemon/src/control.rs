@@ -1,9 +1,6 @@
 //! The control socket: the only way anything outside the daemon reaches policy.
 
-use crate::{
-    clock::boottime_ms,
-    unlock::{UnlockError, Unlocker},
-};
+use crate::clock::boottime_ms;
 use nix::unistd::Uid;
 use omarchy_presence_unlock_protocol::{Decision, Fleet, wire};
 use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
@@ -18,18 +15,16 @@ const MAX_REQUEST_BYTES: u64 = 64;
 /// Concurrent control-socket connections. Over-limit clients are dropped, not queued.
 const MAX_CONCURRENT_CLIENTS: usize = 8;
 
-/// Everything a control-socket request may touch.
+/// Presence state shared by the scanner and control socket.
 pub struct Service {
     pub fleet: Mutex<Fleet>,
-    pub unlocker: Option<Arc<dyn Unlocker>>,
 }
 
 impl Service {
     #[must_use]
-    pub fn new(fleet: Fleet, unlocker: Option<Arc<dyn Unlocker>>) -> Arc<Self> {
+    pub fn new(fleet: Fleet) -> Arc<Self> {
         Arc::new(Self {
             fleet: Mutex::new(fleet),
-            unlocker,
         })
     }
 }
@@ -85,7 +80,6 @@ async fn respond(request: &str, service: &Service) -> String {
     match request {
         wire::REQ_CHECK => render(service.fleet.lock().await.check(boottime_ms())),
         wire::REQ_STATUS => status(service).await,
-        wire::REQ_CONFIRM => confirm(service).await,
         _ => wire::deny(wire::DENY_PROTOCOL),
     }
 }
@@ -119,60 +113,12 @@ async fn status(service: &Service) -> String {
     response
 }
 
-/// Authorises, consumes the authorisation, then releases the lock screen.
-///
-/// The lock-screen check comes first so a confirmation sent while nothing is
-/// locked does not burn the authorisation the user is about to need.
-async fn confirm(service: &Service) -> String {
-    let Some(unlocker) = service.unlocker.clone() else {
-        return wire::deny(wire::DENY_BACKEND);
-    };
-    if unlocker.locked() == Some(false) {
-        return wire::deny(wire::DENY_NOT_LOCKED);
-    }
-    if !service.fleet.lock().await.take_authorization(boottime_ms()) {
-        return wire::deny(wire::DENY_NOT_ELIGIBLE);
-    }
-    // A command backend forks and waits; never on the reactor.
-    match tokio::task::spawn_blocking(move || unlocker.unlock()).await {
-        Ok(Ok(())) => wire::RESP_ALLOW.into(),
-        Ok(Err(UnlockError::NotLocked)) => wire::deny(wire::DENY_NOT_LOCKED),
-        Ok(Err(error)) => {
-            eprintln!("unlock failed: {error}");
-            wire::deny(wire::DENY_UNLOCK_FAILED)
-        }
-        Err(error) => {
-            eprintln!("unlock task panicked: {error}");
-            wire::deny(wire::DENY_UNLOCK_FAILED)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use omarchy_presence_unlock_protocol::{
-        Advertisement, DeviceSpec, Identity, Policy, Quorum, profile::PRESENCE,
+        Advertisement, DeviceSpec, Identity, MultiDeviceAuth, Policy, profile::PRESENCE,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Recorder {
-        locked: Option<bool>,
-        calls: AtomicUsize,
-    }
-
-    impl Unlocker for Recorder {
-        fn describe(&self) -> String {
-            "recorder".into()
-        }
-        fn locked(&self) -> Option<bool> {
-            self.locked
-        }
-        fn unlock(&self) -> Result<(), UnlockError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
 
     fn fleet() -> Fleet {
         Fleet::new(
@@ -182,7 +128,7 @@ mod tests {
                 profile: PRESENCE,
                 policy: Policy::default(),
             }],
-            Quorum::Any,
+            MultiDeviceAuth::Any,
         )
     }
 
@@ -194,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_request_is_a_protocol_denial() {
-        let service = Service::new(fleet(), None);
+        let service = Service::new(fleet());
         assert_eq!(
             respond("HELLO\n", &service).await,
             wire::deny(wire::DENY_PROTOCOL)
@@ -202,51 +148,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirm_without_a_backend_is_refused() {
-        let service = Service::new(fleet(), None);
+    async fn check_reports_current_presence_without_consuming_it() {
+        let service = Service::new(fleet());
         present(&mut *service.fleet.lock().await);
-        assert_eq!(
-            respond(wire::REQ_CONFIRM, &service).await,
-            wire::deny(wire::DENY_BACKEND)
-        );
-    }
-
-    #[tokio::test]
-    async fn confirm_does_not_consume_an_authorization_when_nothing_is_locked() {
-        let recorder = Arc::new(Recorder {
-            locked: Some(false),
-            calls: AtomicUsize::new(0),
-        });
-        let service = Service::new(fleet(), Some(recorder.clone()));
-        present(&mut *service.fleet.lock().await);
-        assert_eq!(
-            respond(wire::REQ_CONFIRM, &service).await,
-            wire::deny(wire::DENY_NOT_LOCKED)
-        );
-        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
-        // The authorisation survived, so the next confirmation can still use it.
+        assert_eq!(respond(wire::REQ_CHECK, &service).await, wire::RESP_ALLOW);
         assert_eq!(respond(wire::REQ_CHECK, &service).await, wire::RESP_ALLOW);
     }
 
     #[tokio::test]
-    async fn one_authorization_releases_exactly_one_lock_screen() {
-        let recorder = Arc::new(Recorder {
-            locked: Some(true),
-            calls: AtomicUsize::new(0),
-        });
-        let service = Service::new(fleet(), Some(recorder.clone()));
-        present(&mut *service.fleet.lock().await);
-        assert_eq!(respond(wire::REQ_CONFIRM, &service).await, wire::RESP_ALLOW);
-        assert_eq!(
-            respond(wire::REQ_CONFIRM, &service).await,
-            wire::deny(wire::DENY_NOT_ELIGIBLE)
-        );
-        assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
     async fn status_lists_every_device_then_the_aggregate() {
-        let service = Service::new(fleet(), None);
+        let service = Service::new(fleet());
         present(&mut *service.fleet.lock().await);
         let response = respond(wire::REQ_STATUS, &service).await;
         let lines: Vec<_> = response.lines().collect();

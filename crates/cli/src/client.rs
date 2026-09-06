@@ -20,23 +20,6 @@ fn connect(timeout: Duration) -> Result<UnixStream, String> {
     Ok(stream)
 }
 
-/// Sends a request and reads exactly one response line.
-///
-/// # Errors
-///
-/// Returns a rendered error when the socket is unreachable or times out.
-pub fn request(payload: &str, timeout: Duration) -> Result<String, String> {
-    let mut stream = connect(timeout)?;
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|e| e.to_string())?;
-    Ok(response)
-}
-
 /// Sends a request and reads lines until the terminator.
 ///
 /// # Errors

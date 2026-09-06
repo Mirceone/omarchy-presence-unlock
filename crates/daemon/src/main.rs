@@ -1,14 +1,13 @@
 use omarchy_presence_unlock_protocol::paths;
-use presenced::{ConfigFile, Fleet, Service, scan, serve, unlock};
+use presenced::{ConfigFile, Fleet, Service, scan, serve};
 use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = ConfigFile::load()?.resolve()?;
-    let unlocker = unlock::build(&settings.backend);
     let adapter = settings.adapter.clone();
 
-    let fleet = Fleet::new(settings.devices, settings.quorum);
+    let fleet = Fleet::new(settings.devices, settings.multi_device_auth);
     for device in fleet.devices() {
         eprintln!(
             "device {} ({}, {})",
@@ -22,11 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     eprintln!(
-        "quorum {:?}, backend {}, skipping per-advertisement reads: {}",
-        settings.quorum,
-        unlocker
-            .as_ref()
-            .map_or_else(|| "disabled".to_string(), |u| u.describe()),
+        "multi-device authentication {:?}, backend Omarchy Quattro (automatic), skipping per-advertisement reads: {}",
+        settings.multi_device_auth,
         scan::skipped_reads(fleet.needs()).join(", ")
     );
 
@@ -40,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )?;
 
-    let service = Service::new(fleet, unlocker);
+    let service = Service::new(fleet);
     let mut server = tokio::spawn(serve(socket_dir.join("control.sock"), Arc::clone(&service)));
     loop {
         tokio::select! {
