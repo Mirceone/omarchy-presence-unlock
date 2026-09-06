@@ -1582,22 +1582,36 @@ fn profile_label(profile_id: &str) -> &'static str {
     profile::find(profile_id).map_or("Unknown profile", |profile| profile.label())
 }
 
-fn device_status_words(row: &wire::DeviceRow<'_>) -> (&'static str, LiveStatusTone) {
+/// What a row says about itself: the word for its Status column, the one thing
+/// the user could do about it, and the tone both are shown in.
+///
+/// The remedy is deliberately not in the column. A sentence long enough to
+/// give advice is longer than any column a terminal has room for, so it is
+/// stated once under the table instead, where it can be a sentence.
+fn device_status_words(
+    row: &wire::DeviceRow<'_>,
+) -> (&'static str, Option<&'static str>, LiveStatusTone) {
     if row.allowed {
-        return ("Near", LiveStatusTone::Green);
+        return ("Near", None, LiveStatusTone::Green);
     }
     match row.reason {
         Some(wire::DENY_DEVICE_LOCKED) => (
-            "Locked — unlock it or enable auto-unlock",
+            "Locked",
+            Some("A locked device cannot authorize an unlock: unlock it, or turn on auto-unlock."),
             LiveStatusTone::Amber,
         ),
-        Some("insufficient-samples") => ("Still confirming", LiveStatusTone::Amber),
-        Some("multi-device-auth") => ("Near — more devices required", LiveStatusTone::Amber),
-        Some("stale") => ("Last heard too long ago", LiveStatusTone::Red),
-        Some("no-device") => ("Not seen", LiveStatusTone::Red),
-        _ => ("Unavailable", LiveStatusTone::Red),
+        Some("insufficient-samples") => ("Still confirming", None, LiveStatusTone::Amber),
+        Some("multi-device-auth") => ("Near", None, LiveStatusTone::Amber),
+        Some("stale") => (
+            "Heard too long ago",
+            Some("Wake the device or bring it closer, so it advertises again."),
+            LiveStatusTone::Red,
+        ),
+        Some("no-device") => ("Not seen", None, LiveStatusTone::Red),
+        _ => ("Unavailable", None, LiveStatusTone::Red),
     }
 }
+
 
 fn live_status_frame(
     screen: &Screen,
@@ -1654,19 +1668,27 @@ fn live_status_frame(
 
     if !rows.is_empty() {
         frame.blank();
-        frame.dim("  Device               Profile              Status                              Signal");
-        for row in rows {
-            let (state, row_tone) = device_status_words(row);
-            let signal = row.rssi.map_or_else(|| "—".into(), dbm);
-            frame.line(tinted_status(
-                format!(
-                    "  {:<20} {:<20} {:<35} {signal}",
-                    row.id,
-                    profile_label(row.profile),
-                    state,
-                ),
-                row_tone,
-            ));
+        // A device is two short lines rather than one wide table row. That is
+        // readable at every ordinary terminal width and leaves no fixed column
+        // layout to collapse when the window is resized.
+        let mut remedies: Vec<&'static str> = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                frame.blank();
+            }
+            let (state, remedy, row_tone) = device_status_words(row);
+            let signal = row.rssi.map_or_else(|| "\u{2014}".into(), dbm);
+            frame.line(format!("{} — {}", row.id, profile_label(row.profile)));
+            frame.line(tinted_status(format!("  {state} · {signal}"), row_tone));
+            if let Some(remedy) = remedy
+                && !remedies.contains(&remedy)
+            {
+                remedies.push(remedy);
+            }
+        }
+        for remedy in remedies {
+            frame.blank();
+            frame.dim(remedy);
         }
     }
     frame.blank();
@@ -2346,11 +2368,24 @@ mod tests {
             lines.iter().any(|line| line.contains("near but locked")),
             "the headline must identify the actionable Watch state: {lines:?}"
         );
+        // The first line identifies the device; the short state and signal are
+        // on the next line so resizing never turns a wide table into extra
+        // terminal rows.
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Locked — unlock it or enable auto-unlock")),
-            "the device row must say how to resolve the refusal: {lines:?}"
+                .any(|line| line.contains("watch — Apple Continuity")),
+            "the device must identify itself: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Locked · −54 dBm")),
+            "the device state must stay with its signal: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("unlock it, or turn on auto-unlock")),
+            "the screen must say how to resolve the refusal: {lines:?}"
         );
     }
 
@@ -2396,18 +2431,13 @@ mod tests {
         )
         .plain();
 
-        let watch = lines
-            .iter()
-            .find(|line| line.contains("watch"))
-            .expect("the Watch row must be rendered");
-        let phone = lines
-            .iter()
-            .find(|line| line.contains("phone"))
-            .expect("the phone row must be rendered");
-        assert!(watch.contains("−54 dBm"));
         assert!(
-            phone.ends_with("—"),
-            "unknown RSSI must not look like zero: {phone}"
+            lines.iter().any(|line| line.contains("Near · −54 dBm")),
+            "the Watch must retain its measured signal: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Not seen · —")),
+            "unknown RSSI must not look like zero: {lines:?}"
         );
     }
 

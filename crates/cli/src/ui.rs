@@ -84,6 +84,7 @@ impl Frame {
         }
     }
 
+
     /// The screen title, with an optional step indicator pushed to the right
     /// margin so a multi-step flow always says where the user is.
     pub fn title(&mut self, title: &str, step: Option<&str>) {
@@ -184,13 +185,20 @@ impl Screen {
     /// the last character of every full-width line. The title line is built to
     /// fill the width exactly, which is why the step indicator was losing its
     /// total.
+    ///
+    /// Every line is clipped to the frame's width. A line longer than the
+    /// terminal wraps onto the row below it, which pushes the whole frame down
+    /// by a row and leaves the tail of the previous, differently sized frame
+    /// on screen — the reason a resize used to leave coloured fragments of an
+    /// earlier screen behind. Clipping keeps one line on one row, so the row
+    /// count a frame occupies is the number of lines it has.
     fn paint(frame: &Frame) -> String {
         let mut out = String::with_capacity(1024);
         out.push_str(HIDE_CURSOR);
         out.push_str(HOME);
         for line in &frame.lines {
             out.push_str(CLEAR_LINE);
-            out.push_str(line);
+            out.push_str(&console::truncate_str(line, frame.width, ""));
             out.push('\n');
         }
         out.push_str(CLEAR_BELOW);
@@ -475,6 +483,30 @@ mod tests {
             !row[content + CLEAR_LINE.len()..].contains(CLEAR_LINE),
             "nothing may erase after the content: {row:?}"
         );
+    }
+
+    /// A resize can make a frame's existing content wider than its new screen.
+    /// The paint boundary must keep one logical line on one terminal row and
+    /// close a style it clips, or both geometry and colour bleed into the rows
+    /// below it.
+    #[test]
+    fn painting_clips_styled_lines_without_leaking_the_style() {
+        let mut frame = Frame::new(5);
+        frame.line("\x1b[32m123456789\x1b[0m");
+        frame.line("plain");
+
+        let painted = Screen::paint(&frame);
+        let rows = painted.split('\n').collect::<Vec<_>>();
+        assert_eq!(
+            console::strip_ansi_codes(rows[0]).trim_start(),
+            "12345"
+        );
+        assert!(
+            rows[0].contains("\x1b[0m"),
+            "clipping must reset an active style: {:?}",
+            rows[0]
+        );
+        assert_eq!(console::strip_ansi_codes(rows[1]).trim_start(), "plain");
     }
 
     #[test]

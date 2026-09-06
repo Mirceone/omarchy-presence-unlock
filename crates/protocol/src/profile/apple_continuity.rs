@@ -20,13 +20,14 @@ fn evaluate(advertisement: &Advertisement<'_>) -> Observation {
         return Observation::Ignore;
     };
     match apple::parse_nearby_info(payload) {
-        Ok(info)
-            if info.watch_locked
-                || !info.watch_auto_unlock_enabled
-                || !info.auto_unlock_enabled =>
-        {
-            Observation::Revoke
-        }
+        // `WATCH_LOCKED` is the state assertion. `AUTO_UNLOCK_ENABLED` is the
+        // accompanying signal that Apple considers the assertion usable for
+        // auto-unlock. `WATCH_AUTO_UNLOCK_ENABLED` is a separate capability /
+        // configuration bit: Mirceone's unlocked, wrist-worn Watch advertises
+        // 0x98 (unlocked + auto-unlock enabled, without that bit), and treating
+        // its absence as "locked" contradicted the state the packet actually
+        // carried.
+        Ok(info) if info.watch_locked || !info.auto_unlock_enabled => Observation::Revoke,
         Ok(_) => Observation::Qualify,
         // An undecodable state claim is never evidence that a Watch is unlocked.
         Err(_) => Observation::Revoke,
@@ -43,19 +44,26 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_with_both_auto_unlock_flags_qualifies() {
+    fn unlocked_watch_with_auto_unlock_enabled_qualifies() {
         let bare = Advertisement::new([1; 6], -50);
-        let unlocked = frame(apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED);
+        // Exact data flags captured from an unlocked enrolled Watch. The
+        // watch-specific capability bit is absent, but the lock bit is clear
+        // and the general auto-unlock bit is set.
+        let observed_unlocked = frame(0x98);
+        let all_capabilities =
+            frame(apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED);
         let locked = frame(
             apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED | apple::WATCH_LOCKED,
         );
-        let watch_auto_unlock_disabled = frame(apple::AUTO_UNLOCK_ENABLED);
-        let mac_auto_unlock_disabled = frame(apple::WATCH_AUTO_UNLOCK_ENABLED);
-        assert_eq!(
-            PROFILE.evaluate(&bare.with_manufacturer_data(&unlocked)),
-            Observation::Qualify
-        );
-        for flags in [locked, watch_auto_unlock_disabled, mac_auto_unlock_disabled] {
+        let auto_unlock_disabled = frame(apple::WATCH_AUTO_UNLOCK_ENABLED);
+
+        for flags in [observed_unlocked, all_capabilities] {
+            assert_eq!(
+                PROFILE.evaluate(&bare.with_manufacturer_data(&flags)),
+                Observation::Qualify
+            );
+        }
+        for flags in [locked, auto_unlock_disabled] {
             assert_eq!(
                 PROFILE.evaluate(&bare.with_manufacturer_data(&flags)),
                 Observation::Revoke
