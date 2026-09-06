@@ -24,11 +24,15 @@ pub(super) static PROVIDER: Provider = Provider::new(
 );
 
 fn enroll(request: &Request<'_>) -> Result<(), String> {
-    crate::pairing::capture_apple_watch(
+    crate::pairing::capture_peripheral(
+        &crate::pairing::Enrollment {
+            profile: APPLE_CONTINUITY.id(),
+            fallback: "watch",
+            id: request.id,
+            save: request.save,
+        },
         request.adapter,
         request.timeout_secs,
-        request.id,
-        request.save,
         request.cancel,
         request.progress,
     )

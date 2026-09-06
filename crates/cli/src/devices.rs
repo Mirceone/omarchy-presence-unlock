@@ -8,8 +8,82 @@ use omarchy_presence_unlock_protocol::{
     paths,
 };
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 use uuid::Uuid;
+
+/// True when this text is a Bluetooth address rather than a name.
+///
+/// `BlueZ` synthesises an alias from the address for a peer it has no name
+/// for, in dashed form, so this is what keeps `63-6a-1a-5c-e5-83` from being
+/// treated as something a user would recognise.
+#[must_use]
+pub fn looks_like_address(text: &str) -> bool {
+    let mut octets = 0;
+    for field in text.split(['-', ':']) {
+        if field.len() != 2 || !field.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+        octets += 1;
+    }
+    octets == 6
+}
+
+/// Derives a usable device id from a name, so the id reads as the device
+/// rather than as the flow that enrolled it. Anything that is not
+/// alphanumeric collapses to a single dash.
+fn slug(name: &str) -> Option<String> {
+    let mut out = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The device id is the config's primary key, not a label: [`add`] upserts on
+/// it, `status` prints it, and removal addresses devices by it. It is the
+/// app's to choose — the user is never asked.
+///
+/// An entry already holding this address keeps its id, because that is the
+/// same hardware being re-registered rather than a new device. Otherwise the
+/// device's own name provides the id, falling back to the address, and a
+/// numeric suffix is appended until it is unique so enrolling something new
+/// can never silently replace something enrolled.
+#[must_use]
+pub fn derive_id(name: Option<&str>, address: Option<&str>) -> String {
+    let entries = ConfigFile::load()
+        .map(|config| config.devices)
+        .unwrap_or_default();
+    if let Some(address) = address
+        && let Some(existing) = entries.iter().find(|entry| {
+            entry
+                .address
+                .as_deref()
+                .is_some_and(|known| known.eq_ignore_ascii_case(address))
+        })
+    {
+        return existing.id.clone();
+    }
+
+    let taken: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+    let base = name
+        .and_then(slug)
+        .or_else(|| address.and_then(slug))
+        .unwrap_or_else(|| "device".to_string());
+    if !taken.contains(&base.as_str()) {
+        return base;
+    }
+    // N enrolled ids can block at most N of the N+1 candidates in this range,
+    // so one is always free and the fallback is unreachable.
+    (2..=taken.len() + 2)
+        .map(|suffix| format!("{base}-{suffix}"))
+        .find(|candidate| !taken.contains(&candidate.as_str()))
+        .unwrap_or(base)
+}
 
 /// The identity criteria a device may be enrolled with. At least one is required.
 #[derive(Default)]
@@ -65,13 +139,12 @@ fn config_path() -> Result<PathBuf, String> {
     paths::config_path().ok_or_else(|| "XDG_CONFIG_HOME or HOME is required".to_string())
 }
 
-/// Reads config.toml for editing, or starts a fresh schema-2 document.
+/// Reads `config.toml` for editing, or starts a fresh current-schema document.
 fn open() -> Result<DocumentMut, String> {
     let path = config_path()?;
     if !path.exists() {
         let mut document = DocumentMut::new();
         document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
-        document["unlock_backend"] = value("disabled");
         return Ok(document);
     }
     fs::read_to_string(&path)
@@ -92,48 +165,6 @@ fn save(document: &DocumentMut) -> Result<(), String> {
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
     write_atomic(&config_path()?, &text, 0o600)
-}
-
-/// Migrates configuration through schema 3 while preserving comments.
-///
-/// Schema 1's top-level Watch becomes a device; schema 2's `kind` field becomes
-/// the canonical profile id resolved through the compile-time registry.
-fn migrate(document: &mut DocumentMut) -> Result<(), String> {
-    let schema = document
-        .get("schema_version")
-        .and_then(Item::as_integer)
-        .unwrap_or(i64::from(CURRENT_SCHEMA));
-    if schema < 2
-        && let Some(irk) = document
-            .get("irk_base64")
-            .and_then(Item::as_str)
-            .map(str::to_owned)
-    {
-        let threshold = document
-            .get("unlock_threshold_dbm")
-            .and_then(Item::as_integer);
-        document.remove("irk_base64");
-        document.remove("unlock_threshold_dbm");
-        let table = upsert(document, "watch")?;
-        table["profile"] = value("apple-continuity");
-        table["irk_base64"] = value(irk);
-        if let Some(threshold) = threshold {
-            table["threshold_dbm"] = value(threshold);
-        }
-    }
-    if schema < 3 {
-        for table in device_array(document)?.iter_mut() {
-            let legacy = table.get("kind").and_then(Item::as_str).map(str::to_owned);
-            if let Some(legacy) = legacy {
-                let canonical = omarchy_presence_unlock_protocol::profile::find(&legacy)
-                    .map_or(legacy.as_str(), |profile| profile.id());
-                table["profile"] = value(canonical);
-                table.remove("kind");
-            }
-        }
-    }
-    document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
-    Ok(())
 }
 
 /// Criteria keys `apply_device` owns; cleared on every update so a re-enrollment
@@ -252,7 +283,6 @@ pub fn add(
     overrides: &Overrides,
 ) -> Result<(), String> {
     let mut document = open()?;
-    migrate(&mut document)?;
     apply_device(&mut document, id, profile, criteria, overrides)?;
     save(&document)
 }
@@ -270,7 +300,6 @@ pub fn add(
 /// would not resolve.
 pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
     let mut document = open()?;
-    migrate(&mut document)?;
     let devices = device_array(&mut document)?;
     let table = devices
         .iter_mut()
@@ -288,7 +317,6 @@ pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
 /// would leave a config that cannot resolve.
 pub fn remove(id: &str) -> Result<(), String> {
     let mut document = open()?;
-    migrate(&mut document)?;
     if document.get("device").is_none() {
         return Err(format!("no device named {id} is configured"));
     }
@@ -301,87 +329,14 @@ pub fn remove(id: &str) -> Result<(), String> {
     save(&document)
 }
 
-/// Sets the quorum expression (`any`, `all`, or `at-least:<n>`).
+/// Sets how many enrolled devices must authorize an unlock.
 ///
 /// # Errors
 ///
-/// Returns an error for an expression this build does not understand.
-pub fn set_quorum(expression: &str) -> Result<(), String> {
+/// Returns an error for a rule this build does not understand.
+pub fn set_multi_device_auth(expression: &str) -> Result<(), String> {
     let mut document = open()?;
-    migrate(&mut document)?;
-    document["quorum"] = value(expression);
-    save(&document)
-}
-
-/// Validates a backend selection, then writes exactly the keys it needs.
-///
-/// Every backend key is cleared first: a stale `unlock_command` left behind by a
-/// previous `command` backend would otherwise survive a switch.
-fn apply_backend(
-    document: &mut DocumentMut,
-    name: &str,
-    process: Option<&str>,
-    signal: Option<&str>,
-    command: &[String],
-) -> Result<(), String> {
-    // Validate before mutating so a rejected switch leaves the document untouched.
-    if !matches!(name, "quattro" | "disabled" | "command" | "process-signal") {
-        return Err(format!(
-            "unknown backend {name}; use quattro, disabled, process-signal, or command"
-        ));
-    }
-    if name == "command" && command.is_empty() {
-        return Err(
-            "backend command requires an argv, for example: backend command -- loginctl unlock-session"
-                .into(),
-        );
-    }
-    if name == "process-signal" {
-        if process.is_none() {
-            return Err(
-                "backend process-signal requires --process <name>, for example --process swaylock"
-                    .into(),
-            );
-        }
-        if !matches!(signal, None | Some("SIGUSR1" | "SIGUSR2")) {
-            return Err("unlock signal must be SIGUSR1 or SIGUSR2".into());
-        }
-    }
-    document["unlock_backend"] = value(name);
-    document.remove("unlock_command");
-    document.remove("unlock_process");
-    document.remove("unlock_signal");
-    match name {
-        "command" => {
-            let mut argv = Array::new();
-            for argument in command {
-                argv.push(argument.as_str());
-            }
-            document["unlock_command"] = value(argv);
-        }
-        "process-signal" => {
-            document["unlock_process"] = value(process.unwrap_or_default());
-            document["unlock_signal"] = value(signal.unwrap_or("SIGUSR1"));
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Selects the unlock backend and the parameters that backend requires.
-///
-/// # Errors
-///
-/// Returns an error when the backend or its parameters are unusable.
-pub fn set_backend(
-    name: &str,
-    process: Option<&str>,
-    signal: Option<&str>,
-    command: &[String],
-) -> Result<(), String> {
-    let mut document = open()?;
-    migrate(&mut document)?;
-    apply_backend(&mut document, name, process, signal, command)?;
+    document["multi_device_auth"] = value(expression);
     save(&document)
 }
 
@@ -393,46 +348,39 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// The bug this guards: `BlueZ` reports an unnamed peer's alias as its own
+    /// address, which was enrolled verbatim as `63-6a-1a-5c-e5-83`.
     #[test]
-    fn migration_moves_a_schema_1_watch_into_the_device_array() {
-        let mut doc = document(
-            "schema_version = 1\nirk_base64 = \"AAAA\"\nunlock_threshold_dbm = -55\nunlock_backend = \"quattro\"\n",
-        );
-        migrate(&mut doc).unwrap();
-        let text = doc.to_string();
-        assert!(text.contains("schema_version = 3"));
-        let reparsed = ConfigFile::parse(&text).unwrap();
-        assert!(
-            reparsed.irk_base64.is_none() && reparsed.unlock_threshold_dbm.is_none(),
-            "schema-1 keys survived: {text}"
-        );
-        assert_eq!(reparsed.devices.len(), 1);
-        assert!(text.contains("[[device]]"));
-        assert!(text.contains("id = \"watch\""));
-        assert!(text.contains("profile = \"apple-continuity\""));
-        assert!(text.contains("threshold_dbm = -55"));
-        // Unrelated backend settings survive the device migration.
-        assert!(text.contains("unlock_backend = \"quattro\""));
+    fn an_address_is_never_mistaken_for_a_device_name() {
+        assert!(looks_like_address("63:6A:1A:5C:E5:83"));
+        assert!(looks_like_address("63-6a-1a-5c-e5-83"));
+        assert!(!looks_like_address("Mirceone\u{2019}s iPhone"));
+        assert!(!looks_like_address("Govee_H605C_427D"));
+        assert!(!looks_like_address("63:6A:1A:5C:E5"));
+        assert!(!looks_like_address(""));
     }
 
+    /// The id is a config key, so a device name has to survive becoming one:
+    /// an unusable id would be written and then fail to resolve.
     #[test]
-    fn migration_is_idempotent_and_canonicalizes_schema_2_profiles() {
-        let mut doc = document(
-            "schema_version = 2\n\n[[device]]\nid = \"watch\"\nkind = \"ble\"\naddress = \"AA:BB:CC:DD:EE:FF\"\n",
+    fn ids_are_derived_from_a_name_and_are_config_safe() {
+        assert_eq!(slug("Pixel 10 Pro").as_deref(), Some("pixel-10-pro"));
+        assert_eq!(
+            slug("Mirceone\u{2019}s iPhone").as_deref(),
+            Some("mirceone-s-iphone")
         );
-        migrate(&mut doc).unwrap();
-        migrate(&mut doc).unwrap();
-        let text = doc.to_string();
-        assert_eq!(text.matches("[[device]]").count(), 1);
-        assert!(text.contains("schema_version = 3"));
-        assert!(text.contains("profile = \"presence\""));
-        assert!(!text.contains("kind ="));
+        assert_eq!(
+            slug("Mi Smart Band 8!!").as_deref(),
+            Some("mi-smart-band-8")
+        );
+        assert_eq!(slug("---").as_deref(), None);
+        assert_eq!(slug("").as_deref(), None);
     }
 
     #[test]
     fn upsert_updates_in_place_rather_than_appending_a_duplicate() {
         let mut doc = document(
-            "schema_version = 3\n\n[[device]]\nid = \"watch\"\nprofile = \"apple-continuity\"\nirk_base64 = \"AAAA\"\n",
+            "schema_version = 4\n\n[[device]]\nid = \"watch\"\nprofile = \"apple-continuity\"\nirk_base64 = \"AAAA\"\n",
         );
         upsert(&mut doc, "watch").unwrap()["profile"] = value("presence");
         upsert(&mut doc, "fob").unwrap()["profile"] = value("presence");
@@ -445,7 +393,7 @@ mod tests {
     #[test]
     fn comments_survive_an_edit() {
         let mut doc = document(
-            "# hand written\nschema_version = 3\n\n[[device]]\nid = \"watch\"\nprofile = \"presence\"\naddress = \"AA:BB:CC:DD:EE:FF\"\n",
+            "# hand written\nschema_version = 4\n\n[[device]]\nid = \"watch\"\nprofile = \"presence\"\naddress = \"AA:BB:CC:DD:EE:FF\"\n",
         );
         upsert(&mut doc, "watch").unwrap()["threshold_dbm"] = value(-60);
         assert!(doc.to_string().contains("# hand written"));
@@ -494,7 +442,7 @@ mod tests {
     #[test]
     fn updating_a_device_replaces_its_whole_definition() {
         let mut doc = document(
-            "schema_version = 3\n\n[[device]]\nid = \"watch\"\nprofile = \"apple-continuity\"\nname_prefix = \"Apple\"\naddress = \"AA:BB:CC:DD:EE:FF\"\nthreshold_dbm = -70\n",
+            "schema_version = 4\n\n[[device]]\nid = \"watch\"\nprofile = \"apple-continuity\"\nname_prefix = \"Apple\"\naddress = \"AA:BB:CC:DD:EE:FF\"\nthreshold_dbm = -70\n",
         );
         apply_device(
             &mut doc,
@@ -532,7 +480,7 @@ mod tests {
     #[test]
     fn a_device_key_of_the_wrong_shape_is_an_error_not_a_panic() {
         for bad in ["device = \"x\"", "device = 5", "device = [1, 2]"] {
-            let mut doc = document(&format!("schema_version = 3\n{bad}\n"));
+            let mut doc = document(&format!("schema_version = 4\n{bad}\n"));
             let error = upsert(&mut doc, "watch").unwrap_err();
             assert!(
                 error.contains("must be a sequence of [[device]] tables"),
@@ -540,57 +488,8 @@ mod tests {
             );
         }
         // An empty inline array is unambiguous, and nothing is lost by replacing it.
-        let mut doc = document("schema_version = 3\ndevice = []\n");
+        let mut doc = document("schema_version = 4\ndevice = []\n");
         upsert(&mut doc, "watch").unwrap()["profile"] = value("presence");
         assert!(doc.to_string().contains("[[device]]"));
-    }
-
-    #[test]
-    fn switching_backends_never_leaves_the_previous_one_s_keys() {
-        let mut doc = document(
-            "schema_version = 3\nunlock_backend = \"command\"\nunlock_command = [\"loginctl\", \"unlock-session\"]\n",
-        );
-        apply_backend(&mut doc, "quattro", None, None, &[]).unwrap();
-        let text = doc.to_string();
-        assert!(text.contains("unlock_backend = \"quattro\""));
-        assert!(
-            !text.contains("unlock_command"),
-            "stale argv survived: {text}"
-        );
-    }
-
-    #[test]
-    fn process_signal_writes_the_keys_the_config_parser_requires() {
-        let mut doc = document("schema_version = 2\nunlock_backend = \"disabled\"\n");
-        apply_backend(&mut doc, "process-signal", Some("swaylock"), None, &[]).unwrap();
-        let text = doc.to_string();
-        assert!(text.contains("unlock_process = \"swaylock\""));
-        assert!(text.contains("unlock_signal = \"SIGUSR1\""));
-        assert_eq!(
-            ConfigFile::parse(&text).unwrap().backend().unwrap(),
-            omarchy_presence_unlock_protocol::config::Backend::ProcessSignal {
-                process: "swaylock".into(),
-                signal: omarchy_presence_unlock_protocol::config::SignalKind::Usr1,
-            }
-        );
-    }
-
-    #[test]
-    fn a_rejected_backend_leaves_the_document_untouched() {
-        let before =
-            "schema_version = 2\nunlock_backend = \"command\"\nunlock_command = [\"loginctl\"]\n";
-        for (name, process, signal) in [
-            ("process-signal", None, None),
-            ("process-signal", Some("swaylock"), Some("SIGKILL")),
-            ("command", None, None),
-            ("nonsense", None, None),
-        ] {
-            let mut doc = document(before);
-            assert!(
-                apply_backend(&mut doc, name, process, signal, &[]).is_err(),
-                "{name} was accepted"
-            );
-            assert_eq!(doc.to_string(), before, "{name} mutated the document");
-        }
     }
 }

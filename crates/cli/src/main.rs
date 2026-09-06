@@ -65,22 +65,8 @@ enum Commands {
     },
     /// Remove an enrolled device.
     RemoveDevice { id: String },
-    /// How many enrolled devices must be present: any, all, or at-least:<n>.
-    Quorum { expression: String },
-    /// Choose what releases the lock screen.
-    Backend {
-        /// quattro, disabled, process-signal, or command.
-        name: String,
-        /// Process name for process-signal, matched against /proc/<pid>/comm.
-        #[arg(long)]
-        process: Option<String>,
-        /// SIGUSR1 (default) or SIGUSR2, for process-signal.
-        #[arg(long)]
-        signal: Option<String>,
-        /// Argv for `command`, for example: -- loginctl unlock-session.
-        #[arg(trailing_var_arg = true)]
-        command: Vec<String>,
-    },
+    /// Choose how many enrolled devices must authorize an unlock: any, all, or at-least:<n>.
+    MultiDeviceAuth { expression: String },
     /// Scan for advertising BLE devices (live, not the `BlueZ` cache).
     Devices {
         /// Bluetooth adapter name. Uses the `BlueZ` default adapter when omitted.
@@ -118,9 +104,10 @@ enum Commands {
         /// Seconds to wait for the device to complete enrollment.
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
-        /// Device id to write when --save is given.
-        #[arg(long, default_value = "watch")]
-        id: String,
+        /// Device id to write when --save is given. Defaults to the name the
+        /// device reports for itself.
+        #[arg(long)]
+        id: Option<String>,
         /// Save the resulting credentials. Off by default.
         #[arg(long)]
         save: bool,
@@ -147,14 +134,11 @@ enum Commands {
     Doctor,
     /// Print the daemon's per-device and aggregate decision.
     Status,
-    /// Confirm an unlock request from a lock-screen keybinding.
-    Confirm,
     /// Install the lock-screen integration for this Omarchy build.
     SetupOmarchy,
-    /// Interactive menu: enroll a device, manage enrolled devices, choose the
-    /// unlock backend, set quorum, wire the lock screen, run diagnostics, and
-    /// watch live status. Also runs when no subcommand is given, in a
-    /// terminal.
+    /// Interactive menu: enroll a device, manage enrolled devices, configure
+    /// multi-device authentication, wire the lock screen, run diagnostics, and
+    /// watch live status. Also runs when no subcommand is given, in a terminal.
     Init,
 }
 
@@ -166,6 +150,9 @@ enum Commands {
 fn report_progress(progress: enrollment::Progress) {
     match progress {
         enrollment::Progress::Phase(phase) => println!("{}", phase.describe()),
+        enrollment::Progress::Enrolled { id, .. } => {
+            println!("enrolled as {id}; restart presenced");
+        }
         enrollment::Progress::Cleanup(cleanup) if cleanup.ok => {
             println!("{}", cleanup.label);
         }
@@ -184,7 +171,7 @@ fn enroll_device(
     provider: &str,
     adapter: Option<&str>,
     timeout_secs: u64,
-    id: &str,
+    id: Option<&str>,
     save: bool,
 ) -> Result<(), String> {
     interrupt::install(|| {});
@@ -200,9 +187,9 @@ fn enroll_device(
             progress: &report_progress,
         },
     )?;
-    if save {
-        println!("enrolled {id}; restart presenced");
-    } else {
+    // The enrolled id is reported as it is written, because only the flow
+    // knows what the device called itself.
+    if !save {
         println!("identity obtained and verified; re-run with --save to enroll it");
     }
     Ok(())
@@ -234,19 +221,6 @@ fn status() -> Result<(), String> {
         println!("{line}");
     }
     Ok(())
-}
-
-fn confirm() -> Result<(), String> {
-    // A refused unlock must be a nonzero exit so the keybinding and any wrapper
-    // script can tell it apart from success. CONFIRM releases a lock screen, so it
-    // gets a deadline well above the in-memory CHECK path.
-    let response = client::request(wire::REQ_CONFIRM, Duration::from_secs(2))?;
-    if response == wire::RESP_ALLOW {
-        print!("{response}");
-        Ok(())
-    } else {
-        Err(response.trim().to_string())
-    }
 }
 
 fn main() {
@@ -285,13 +259,9 @@ fn main() {
             },
         ),
         Some(Commands::RemoveDevice { id }) => devices::remove(&id),
-        Some(Commands::Quorum { expression }) => devices::set_quorum(&expression),
-        Some(Commands::Backend {
-            name,
-            process,
-            signal,
-            command,
-        }) => devices::set_backend(&name, process.as_deref(), signal.as_deref(), &command),
+        Some(Commands::MultiDeviceAuth { expression }) => {
+            devices::set_multi_device_auth(&expression)
+        }
         Some(Commands::Devices { adapter, scan_secs }) => {
             pairing::list_advertising(adapter.as_deref(), scan_secs)
         }
@@ -307,7 +277,13 @@ fn main() {
             timeout_secs,
             id,
             save,
-        }) => enroll_device(&provider, adapter.as_deref(), timeout_secs, &id, save),
+        }) => enroll_device(
+            &provider,
+            adapter.as_deref(),
+            timeout_secs,
+            id.as_deref(),
+            save,
+        ),
         Some(Commands::Profiles) => {
             enrollment::print_catalog();
             Ok(())
@@ -318,7 +294,6 @@ fn main() {
         Some(Commands::MgmtMonitor { adapter_index }) => enrollment::run_mgmt_helper(adapter_index),
         Some(Commands::Doctor) => doctor::doctor(),
         Some(Commands::Status) => status(),
-        Some(Commands::Confirm) => confirm(),
         Some(Commands::SetupOmarchy) => setup::setup_omarchy(),
         Some(Commands::Init) => wizard::run(),
     };

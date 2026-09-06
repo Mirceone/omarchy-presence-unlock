@@ -794,11 +794,19 @@ async fn initiate_security(device: &bluer::Device) -> Result<(), String> {
 }
 
 /// Verifies the captured key against the address the kernel saw it used on,
-/// then enrolls it when asked to.
+/// then enrolls it when asked to, reporting the id it was enrolled under.
+///
+/// `id` is what the caller insisted on; `name` is what will name the id when
+/// the caller insisted on nothing; `reported` is the peer's own name, carried
+/// separately because a screen must not claim a name the device never gave.
 fn save_capture(
     capture: &crate::enrollment::mgmt::CapturedIrk,
-    id: &str,
+    profile: &str,
+    id: Option<&str>,
+    name: Option<&str>,
+    reported: Option<String>,
     save: bool,
+    progress: Sink<'_>,
 ) -> Result<(), String> {
     let rpa = Address::new(
         parse_address(&capture.random_address)
@@ -808,9 +816,10 @@ fn save_capture(
     if !save {
         return Ok(());
     }
+    let id = id.map_or_else(|| devices::derive_id(name, None), str::to_string);
     devices::add(
-        id,
-        "apple-continuity",
+        &id,
+        profile,
         &Criteria {
             irk_base64: Some(STANDARD.encode(capture.key)),
             ..Criteria::default()
@@ -820,7 +829,9 @@ fn save_capture(
             minimum_samples: None,
             freshness_ms: None,
         },
-    )
+    )?;
+    progress(Progress::Enrolled { id, name: reported });
+    Ok(())
 }
 
 /// Disconnects and forgets the peripheral this flow created, reporting whether
@@ -842,9 +853,65 @@ async fn cleanup_capture_device(
     }));
 }
 
+/// What one guided enrollment is enrolling, independent of the transport that
+/// captures it.
+pub(crate) struct Enrollment<'a> {
+    /// Profile the captured identity is enrolled under. Every peripheral
+    /// bonds the same way; what its advertisements may then assert is the
+    /// provider's decision.
+    pub profile: &'a str,
+    /// Names the enrollment when the peer never reports a name of its own.
+    pub fallback: &'a str,
+    /// Id the caller insisted on. `None` names the device after itself.
+    pub id: Option<&'a str>,
+    pub save: bool,
+}
+
+/// A peer's own name, or `None` when it has not given one.
+///
+/// `BlueZ` synthesises an alias from the address for a peer it has no name
+/// for, so an alias can be the address itself in dashed form. That is not a
+/// name: it names nothing a user would recognise and must never become an id.
+fn reported_name(candidate: Option<String>) -> Option<String> {
+    let candidate = candidate?;
+    let trimmed = candidate.trim();
+    (!trimmed.is_empty() && !devices::looks_like_address(trimmed)).then(|| trimmed.to_string())
+}
+
+/// How long to keep asking for a peer's name after bonding.
+///
+/// A phone withholds its name until pairing completes, and `bluetoothd` then
+/// learns it from a GAP read that lands slightly later. Waiting is what makes
+/// the difference between enrolling `mirceones-iphone` and enrolling the
+/// address the phone happened to be using.
+const NAME_WAIT: Duration = Duration::from_secs(3);
+
+async fn resolve_peer_name(device: &bluer::Device) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + NAME_WAIT;
+    loop {
+        if let Some(name) = reported_name(device.name().await.ok().flatten()) {
+            return Some(name);
+        }
+        if let Some(name) = reported_name(device.alias().await.ok()) {
+            return Some(name);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// What one capture attempt is enrolling, and where it reports to.
 struct Capture<'a> {
-    id: &'a str,
+    /// Profile the captured identity is enrolled under. The transport is the
+    /// same for every peripheral that bonds with us; what the resulting
+    /// advertisements are allowed to assert is the provider's decision.
+    profile: &'a str,
+    id: Option<&'a str>,
+    /// Names the enrollment when the peer never reports a name of its own,
+    /// so an id always says what kind of device it is.
+    fallback: &'a str,
     save: bool,
     progress: Sink<'a>,
 }
@@ -894,7 +961,11 @@ async fn active_capture(
     )
     .await
     .map_err(|_| format!("no device connected within {timeout_secs} seconds"))??;
-    progress(Progress::Phase(Phase::Connected(device.alias().await.ok())));
+    // Read before bonding only to tell the user who answered; a phone reports
+    // no name until it has paired, so the enrollment name is resolved after.
+    progress(Progress::Phase(Phase::Connected(reported_name(
+        device.alias().await.ok(),
+    ))));
     let result = async {
         initiate_security(&device).await?;
         progress(Progress::Phase(Phase::Bonded));
@@ -904,7 +975,17 @@ async fn active_capture(
                 "bonding completed, but the kernel produced no remote IRK".to_string()
             })??;
         progress(Progress::Phase(Phase::IdentityReceived));
-        save_capture(&captured, capture.id, capture.save)?;
+        let peer_name = resolve_peer_name(&device).await;
+        let named = peer_name.clone();
+        save_capture(
+            &captured,
+            capture.profile,
+            capture.id,
+            peer_name.as_deref().or(Some(capture.fallback)),
+            named,
+            capture.save,
+            progress,
+        )?;
         progress(Progress::Phase(Phase::Verified));
         Ok(())
     }
@@ -971,10 +1052,9 @@ async fn restore_pairability(adapter: &Adapter, pairable: bool, timeout: u32) ->
 }
 
 async fn advertise_flow(
+    enrollment: &Enrollment<'_>,
     adapter_name: Option<&str>,
     timeout_secs: u64,
-    id: &str,
-    save: bool,
     cancel: &AtomicBool,
     progress: Sink<'_>,
 ) -> Result<(), String> {
@@ -1000,7 +1080,13 @@ async fn advertise_flow(
         return Err(error.to_string());
     }
 
-    let capture = Capture { id, save, progress };
+    let capture = Capture {
+        profile: enrollment.profile,
+        id: enrollment.id,
+        fallback: enrollment.fallback,
+        save: enrollment.save,
+        progress,
+    };
 
     let result = tokio::select! {
         result = active_capture(
@@ -1025,25 +1111,28 @@ async fn advertise_flow(
     result
 }
 
-/// Captures a Watch IRK through the proven Linux-peripheral pairing flow.
+/// Enrolls whatever peripheral bonds with this computer, under `profile`.
+///
+/// Every guided provider shares this transport: the computer advertises as a
+/// pairable peripheral, the user picks it on the device, and the kernel hands
+/// back the identity key distributed during bonding. Providers differ only in
+/// the words they show and in what the resulting advertisements may assert.
 ///
 /// # Errors
 ///
 /// Returns an error for an unusable adapter, management-monitor failure, timeout,
 /// rejected pairing, missing IRK, failed self-check, or failed enrollment.
-pub(crate) fn capture_apple_watch(
+pub(crate) fn capture_peripheral(
+    enrollment: &Enrollment<'_>,
     adapter_name: Option<&str>,
     timeout_secs: u64,
-    id: &str,
-    save: bool,
     cancel: &AtomicBool,
     progress: Sink<'_>,
 ) -> Result<(), String> {
     runtime()?.block_on(advertise_flow(
+        enrollment,
         adapter_name,
         timeout_secs,
-        id,
-        save,
         cancel,
         progress,
     ))

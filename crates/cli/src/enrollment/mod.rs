@@ -6,6 +6,7 @@
 
 mod apple_watch;
 pub(crate) mod mgmt;
+mod phone;
 
 use omarchy_presence_unlock_protocol::Profile;
 
@@ -56,7 +57,8 @@ impl Phase {
             Self::AdapterReady => "Bluetooth adapter ready".to_string(),
             Self::MonitorReady => "Secure pairing monitor ready".to_string(),
             Self::Advertising(name) => format!("Advertising as \u{201c}{name}\u{201d}"),
-            Self::Connected(_) => "Device connected".to_string(),
+            Self::Connected(Some(name)) => format!("\u{201c}{name}\u{201d} is pairing"),
+            Self::Connected(None) => "Device connected".to_string(),
             Self::Bonded => "Secure pairing completed".to_string(),
             Self::IdentityReceived => "Device identity received".to_string(),
             Self::Verified => "Device identity verified".to_string(),
@@ -97,6 +99,14 @@ pub struct Cleanup {
 pub enum Progress {
     Phase(Phase),
     Cleanup(Cleanup),
+    /// An enrollment was written to config under this id, together with the
+    /// name the device reported for itself when it reported one. Both are
+    /// reported rather than returned because neither is settled until the
+    /// device has paired, which happens mid-flow.
+    Enrolled {
+        id: String,
+        name: Option<String>,
+    },
 }
 
 /// Where an enrollment reports to.
@@ -108,7 +118,10 @@ pub type Sink<'a> = &'a (dyn Fn(Progress) + Sync);
 pub struct Request<'a> {
     pub adapter: Option<&'a str>,
     pub timeout_secs: u64,
-    pub id: &'a str,
+    /// Id to enroll under. `None` lets the flow name the device after itself,
+    /// which is what every guided enrollment wants: an id chosen up front
+    /// could only describe the flow, not the device that answered it.
+    pub id: Option<&'a str>,
     pub save: bool,
     /// Set to ask a long-running enrollment to stop early and clean up.
     pub cancel: &'a std::sync::atomic::AtomicBool,
@@ -184,7 +197,7 @@ impl Provider {
     }
 }
 
-pub static PROVIDERS: [&Provider; 1] = [&apple_watch::PROVIDER];
+pub static PROVIDERS: [&Provider; 2] = [&apple_watch::PROVIDER, &phone::PROVIDER];
 
 #[must_use]
 pub fn find(id: &str) -> Option<&'static Provider> {
@@ -287,5 +300,27 @@ mod tests {
             assert!(!pair[0].describe().is_empty());
             assert!(!pair[0].waiting_for().is_empty());
         }
+    }
+
+    /// A phone in a pocket says nothing about who is carrying it, so its
+    /// provider must not enroll under a profile that claims device state.
+    #[test]
+    fn only_providers_whose_device_proves_its_state_may_attest_one() {
+        let phone = find("phone").expect("the phone provider is registered");
+        assert!(!phone.profile().attests_device_state());
+        let watch = find("apple-watch").expect("the Apple Watch provider is registered");
+        assert!(watch.profile().attests_device_state());
+    }
+
+    /// Several candidates can be on a phone's Bluetooth screen at once, so the
+    /// connecting device is named rather than reported as a generic connection.
+    #[test]
+    fn a_connecting_device_is_reported_by_name_when_one_is_known() {
+        assert!(
+            Phase::Connected(Some("Mirceone\u{2019}s iPhone".into()))
+                .describe()
+                .contains("Mirceone\u{2019}s iPhone")
+        );
+        assert_eq!(Phase::Connected(None).describe(), "Device connected");
     }
 }
