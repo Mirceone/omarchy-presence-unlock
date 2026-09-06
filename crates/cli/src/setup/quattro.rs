@@ -239,6 +239,29 @@ pub(super) fn reload_hyprland() -> Result<(), String> {
     }
 }
 
+/// Arms the presence service, so setup leaves a machine that actually answers.
+///
+/// The path unit is what makes an unenrolled machine usable: the service
+/// refuses to run with nothing configured, so it stays enabled but stopped
+/// until a config appears. Only an already-enrolled machine is started here.
+///
+/// Best-effort: a dev checkout with no installed units must stay able to run
+/// setup, and a failure here costs the service, not the lock integration that
+/// has already landed.
+fn enable_service() -> Result<(), String> {
+    super::run(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+    super::run(Command::new("systemctl").args([
+        "--user",
+        "enable",
+        "presenced.path",
+        "presenced.service",
+    ]))?;
+    super::run(Command::new("systemctl").args(["--user", "start", "presenced.path"]))?;
+    let enrolled = paths::config_path().is_some_and(|path| path.is_file());
+    let unit = if enrolled { "restart" } else { "stop" };
+    super::run(Command::new("systemctl").args(["--user", unit, "presenced.service"]))
+}
+
 pub fn setup() -> Result<(), String> {
     let source = paths::shell_plugin_source();
     for required in ["manifest.json", "Service.qml"] {
@@ -273,6 +296,9 @@ pub fn setup() -> Result<(), String> {
     super::run(Command::new("omarchy").args(["plugin", "enable", STOCK_PLUGIN_ID]))?;
     remove_obsolete_update_hook()?;
     reload_hyprland()?;
+    if let Err(error) = enable_service() {
+        eprintln!("warning: could not arm the presence service: {error}");
+    }
 
     println!(
         "Enabled {PLUGIN_ID} beside the stock {STOCK_PLUGIN_ID} lock and installed the Alt hold binding."
