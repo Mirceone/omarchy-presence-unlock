@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "presence.unlock",
+  "name": "Presence Unlock",
+  "version": "1.0.0",
+  "author": "Mirceone",
+  "description": "Unlocks the stock Omarchy lock after an explicit presence-authorized gesture.",
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

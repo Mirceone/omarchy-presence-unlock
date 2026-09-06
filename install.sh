@@ -56,6 +56,8 @@ required_sources=(
   packaging/presenced.service
   packaging/presenced.path
   packaging/omarchy-lock-presence.pam
+  packaging/plugin/manifest.json
+  packaging/plugin/Service.qml
   README.md
   LICENSE
 )
@@ -63,21 +65,12 @@ for source in "${required_sources[@]}"; do
   [[ -f $source ]] || die "required source file is missing: $source"
 done
 
-printf 'Building release artifacts...\n'
-cargo build --release --workspace --locked
-
-required_artifacts=(
-  target/release/omarchy-presence-unlock
-  target/release/presenced
-  target/release/libpam_omarchy_presence_unlock.so
-)
-for artifact in "${required_artifacts[@]}"; do
-  [[ -f $artifact ]] || die "build did not produce $artifact"
-done
-
-# Authenticate before changing the system so a bad or cancelled credential
+# Authenticate before system changes so a cancelled or timed-out password
 # prompt leaves the existing installation untouched.
 sudo -v
+
+printf 'Building release artifacts...\n'
+cargo build --release --workspace --locked
 
 printf 'Installing system files...\n'
 sudo install -Dm755 target/release/omarchy-presence-unlock /usr/bin/omarchy-presence-unlock
@@ -86,12 +79,25 @@ sudo install -Dm755 target/release/libpam_omarchy_presence_unlock.so /usr/lib/se
 sudo install -Dm644 packaging/presenced.service /usr/lib/systemd/user/presenced.service
 sudo install -Dm644 packaging/presenced.path /usr/lib/systemd/user/presenced.path
 sudo install -Dm644 packaging/omarchy-lock-presence.pam /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
+sudo install -Dm644 packaging/plugin/manifest.json /usr/share/omarchy-presence-unlock/plugin/manifest.json
+sudo install -Dm644 packaging/plugin/Service.qml /usr/share/omarchy-presence-unlock/plugin/Service.qml
 sudo install -Dm644 README.md /usr/share/doc/omarchy-presence-unlock/README.md
 sudo install -Dm644 LICENSE /usr/share/licenses/omarchy-presence-unlock/LICENSE
 
-# Clean cutover from releases that used the project-specific daemon name.
-systemctl --user disable --now omarchy-presence-unlockd.service >/dev/null 2>&1 || true
-sudo rm -f /usr/bin/omarchy-presence-unlockd /usr/lib/systemd/user/omarchy-presence-unlockd.service
+required_installed=(
+  /usr/bin/omarchy-presence-unlock
+  /usr/bin/presenced
+  /usr/lib/security/pam_omarchy_presence_unlock.so
+  /usr/lib/systemd/user/presenced.service
+  /usr/lib/systemd/user/presenced.path
+  /usr/share/omarchy-presence-unlock/omarchy-lock-presence.pam
+  /usr/share/omarchy-presence-unlock/plugin/manifest.json
+  /usr/share/omarchy-presence-unlock/plugin/Service.qml
+)
+for path in "${required_installed[@]}"; do
+  [[ -f $path ]] || die "installation failed; expected file missing: $path"
+done
+
 
 printf 'Enabling the user service and configuration watcher...\n'
 systemctl --user daemon-reload
@@ -119,3 +125,4 @@ command -v omarchy-presence-unlock >/dev/null 2>&1 \
 
 printf '\nInstalled Omarchy Presence Unlock and %s.\n' "$SERVICE_RESULT"
 printf 'Run omarchy-presence-unlock to open the setup menu.\n'
+printf 'Lock-screen gesture integration is applied by omarchy-presence-unlock setup-omarchy.\n'

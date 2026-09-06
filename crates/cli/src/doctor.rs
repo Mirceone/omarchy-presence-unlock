@@ -2,7 +2,7 @@
 
 use crate::client;
 use omarchy_presence_unlock_protocol::{
-    config::{Backend, ConfigFile},
+    config::ConfigFile,
     paths::{config_path, current_socket_path},
     wire,
 };
@@ -14,21 +14,58 @@ use std::{
     time::Duration,
 };
 
-const SERVICE_MARKER: &str = "// omarchy-presence-unlock:service";
-const VIEW_MARKER: &str = "// omarchy-presence-unlock:view";
+const PLUGIN_ID: &str = "presence.unlock";
+const STOCK_PLUGIN_ID: &str = "omarchy.lock";
+const SERVICE_MARKER: &str = "// omarchy-presence-unlock:companion";
+const BINDING_MARKER: &str = "-- omarchy-presence-unlock:start";
 const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
-const UPDATE_HOOK: &str = ".config/omarchy/hooks/post-update.d/omarchy-presence-unlock";
 
 struct QuattroIntegration {
-    plugin_id: String,
     service: PathBuf,
-    view: PathBuf,
+    bindings: PathBuf,
+}
+
+/// One finished check, in the order it was run.
+///
+/// Checks are values rather than printed lines because two callers render
+/// them differently: the command prints them, and the wizard paints them as a
+/// checklist. A printing `doctor` could only ever serve the first.
+pub struct Check {
+    pub ok: bool,
+    pub label: String,
+}
+
+/// Every check that ran, ending at the first failure.
+///
+/// Stopping is deliberate: a later check reads state an earlier failure
+/// invalidates, so continuing would report consequences as separate problems.
+#[must_use]
+pub fn report() -> Vec<Check> {
+    let mut checks = Vec::new();
+    if let Err(problem) = collect(&mut checks) {
+        checks.push(Check {
+            ok: false,
+            label: problem,
+        });
+    }
+    checks
 }
 
 /// # Errors
 ///
 /// Returns the first problem found, rendered for the terminal.
 pub fn doctor() -> Result<(), String> {
+    let checks = report();
+    for check in checks.iter().filter(|check| check.ok) {
+        println!("ok: {}", check.label);
+    }
+    match checks.into_iter().find(|check| !check.ok) {
+        Some(failure) => Err(failure.label),
+        None => Ok(()),
+    }
+}
+
+fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
     let path = config_path().ok_or("XDG_CONFIG_HOME or HOME is required")?;
     let config = ConfigFile::from_path(&path).map_err(|error| error.to_string())?;
     let settings = config.resolve().map_err(|error| error.to_string())?;
@@ -45,24 +82,7 @@ pub fn doctor() -> Result<(), String> {
         ));
     }
 
-    let quattro = quattro_integration();
-    match &settings.backend {
-        Backend::Quattro => validate_quattro(quattro.as_ref())?,
-        Backend::Disabled => {}
-        Backend::ProcessSignal { process, .. } => {
-            if !executable(process) {
-                return Err(format!(
-                    "unlock backend signals {process}, but {process} is not on PATH"
-                ));
-            }
-        }
-        Backend::Command(argv) => {
-            let program = &argv[0];
-            if !executable(program) {
-                return Err(format!("unlock command {program} is not on PATH"));
-            }
-        }
-    }
+    validate_quattro(quattro_integration().as_ref())?;
 
     let socket = current_socket_path();
     let metadata = fs::metadata(&socket).map_err(|_| {
@@ -95,94 +115,101 @@ pub fn doctor() -> Result<(), String> {
         ));
     }
 
-    println!(
-        "ok: schema {}, {} device(s), quorum {:?}, backend {}",
+    let mut pass = |label: String| checks.push(Check { ok: true, label });
+    pass(format!(
+        "schema {}, {} device(s), multi-device authentication {:?}",
         config.schema_version,
         settings.devices.len(),
-        settings.quorum,
-        config.unlock_backend
-    );
-    if let Some(integration) = quattro {
-        println!("ok: active Quattro plugin {}", integration.plugin_id);
-        println!("ok: presence PAM policy {PAM_POLICY}");
-        if let Some(hook) = update_hook_path() {
-            println!("ok: Omarchy post-update rebase hook {}", hook.display());
-        }
-    }
-    println!(
-        "ok: presenced {}, private socket {}",
+        settings.multi_device_auth
+    ));
+    pass(format!(
+        "companion plugin {PLUGIN_ID} with stock lock {STOCK_PLUGIN_ID}"
+    ));
+    pass("Alt hold/release binding".to_string());
+    pass(format!("presence PAM policy {PAM_POLICY}"));
+    pass(format!(
+        "presenced {}, private socket {}",
         user_service_state(),
         socket.display()
-    );
+    ));
     for device in &settings.devices {
-        println!("  {} ({})", device.id, device.profile.id());
+        pass(format!("device {} ({})", device.id, device.profile.id()));
     }
     Ok(())
 }
 
 fn quattro_integration() -> Option<QuattroIntegration> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let plugin_id = "presence.lock".to_string();
-    let directory = home.join(".config/omarchy/plugins").join(&plugin_id);
     Some(QuattroIntegration {
-        plugin_id,
-        service: directory.join("Service.qml"),
-        view: directory.join("LockView.qml"),
+        service: home
+            .join(".config/omarchy/plugins")
+            .join(PLUGIN_ID)
+            .join("Service.qml"),
+        bindings: home.join(".config/hypr/bindings.lua"),
     })
-}
-fn update_hook_path() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(UPDATE_HOOK))
 }
 
 fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), String> {
     let integration = integration.ok_or(
-        "unlock backend is disabled and the Quattro plugin path cannot be resolved; run `omarchy-presence-unlock setup-omarchy`",
+        "the Quattro integration path cannot be resolved; run `omarchy-presence-unlock setup-omarchy`",
     )?;
     let service = fs::read_to_string(&integration.service).map_err(|_| {
         format!(
-            "unlock backend is disabled but {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            "presence companion service {} is missing; run `omarchy-presence-unlock setup-omarchy`",
             integration.service.display()
         )
     })?;
-    let view = fs::read_to_string(&integration.view).map_err(|_| {
-        format!(
-            "Quattro presence view {} is missing; run `omarchy-presence-unlock setup-omarchy`",
-            integration.view.display()
-        )
-    })?;
-    if !service.contains(SERVICE_MARKER) || !view.contains(VIEW_MARKER) {
+    if !service.contains(SERVICE_MARKER) {
         return Err(
-            "the active Quattro clone does not contain the current presence integration; rerun `omarchy-presence-unlock setup-omarchy`"
+            "the installed companion plugin is not the current presence integration; rerun `omarchy-presence-unlock setup-omarchy`"
                 .into(),
         );
     }
+
+    let bindings = fs::read_to_string(&integration.bindings).map_err(|_| {
+        format!(
+            "Hyprland bindings file {} is missing; run `omarchy-presence-unlock setup-omarchy`",
+            integration.bindings.display()
+        )
+    })?;
+    for required in [
+        BINDING_MARKER,
+        "ALT_L",
+        "ALT_R",
+        "presence-unlock hold",
+        "presence-unlock release",
+        "ignore_mods = true",
+        "release = true",
+        "locked = true",
+        "non_consuming = true",
+    ] {
+        if !bindings.contains(required) {
+            return Err(format!(
+                "the Alt presence binding is incomplete (missing {required:?}); rerun `omarchy-presence-unlock setup-omarchy`"
+            ));
+        }
+    }
+
     if !std::path::Path::new(PAM_POLICY).is_file() {
         return Err(format!(
             "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup-omarchy`"
         ));
     }
-    let hook = update_hook_path().ok_or(
-        "HOME is required to locate the Omarchy post-update hook; rerun `omarchy-presence-unlock setup-omarchy`",
-    )?;
-    let hook_metadata = fs::metadata(&hook).map_err(|_| {
-        format!(
-            "Omarchy post-update hook is missing at {}; rerun `omarchy-presence-unlock setup-omarchy`",
-            hook.display()
-        )
-    })?;
-    if !hook_metadata.is_file() || hook_metadata.permissions().mode() & 0o111 == 0 {
+    if !plugin_is_enabled(PLUGIN_ID) {
         return Err(format!(
-            "Omarchy post-update hook at {} is not executable; rerun `omarchy-presence-unlock setup-omarchy`",
-            hook.display()
+            "companion plugin {PLUGIN_ID} is not enabled; run `omarchy plugin enable {PLUGIN_ID}`"
         ));
     }
-    if !plugin_is_enabled(&integration.plugin_id) {
+    if !plugin_is_enabled(STOCK_PLUGIN_ID) {
         return Err(format!(
-            "Quattro plugin {} is not enabled; run `omarchy plugin enable {}`",
-            integration.plugin_id, integration.plugin_id
+            "stock lock plugin {STOCK_PLUGIN_ID} is not enabled; rerun `omarchy-presence-unlock setup-omarchy`"
         ));
+    }
+    if !companion_responds() {
+        return Err(
+            "the presence companion IPC target is unavailable; run `omarchy restart shell` and retry"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -194,15 +221,25 @@ fn plugin_is_enabled(plugin_id: &str) -> bool {
     else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    let needle = format!("\"id\":\"{plugin_id}\"");
-    listing
-        .find(&needle)
-        .and_then(|start| listing[start..].split_once('}').map(|(object, _)| object))
-        .is_some_and(|object| object.contains("\"enabled\":true"))
+    output.status.success() && plugin_enabled_in(&output.stdout, plugin_id)
+}
+
+fn plugin_enabled_in(listing: &[u8], plugin_id: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(listing).is_ok_and(|value| {
+        value.as_array().is_some_and(|plugins| {
+            plugins.iter().any(|plugin| {
+                plugin.get("id").and_then(serde_json::Value::as_str) == Some(plugin_id)
+                    && plugin.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+        })
+    })
+}
+
+fn companion_responds() -> bool {
+    Command::new("omarchy-shell")
+        .args(["presence-unlock", "ping"])
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"ok")
 }
 
 fn user_service_state() -> String {
@@ -214,30 +251,16 @@ fn user_service_state() -> String {
         .map_or_else(|| "unknown".into(), |state| state.trim().to_string())
 }
 
-/// True when `program` runs. `--version` is the one flag every lock screen and
-/// session tool in scope accepts.
-fn executable(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn compact_plugin_listing_detects_only_the_enabled_target() {
+    fn plugin_listing_detects_only_the_enabled_target() {
         let listing =
-            r#"[{"id":"presence.lock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
-        let needle = "\"id\":\"presence.lock\"";
-        let enabled = listing
-            .find(needle)
-            .and_then(|start| listing[start..].split_once('}').map(|(object, _)| object))
-            .is_some_and(|object| object.contains("\"enabled\":true"));
-        assert!(enabled);
-        assert!(!listing.contains("\"id\":\"bob.lock\""));
+            br#"[{"id":"presence.unlock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
+        assert!(plugin_enabled_in(listing, PLUGIN_ID));
+        assert!(!plugin_enabled_in(listing, STOCK_PLUGIN_ID));
+        assert!(!plugin_enabled_in(listing, "bob.lock"));
     }
 }

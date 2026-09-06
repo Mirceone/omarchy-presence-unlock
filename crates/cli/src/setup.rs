@@ -1,4 +1,4 @@
-//! Lock-screen integration for Omarchy's Quattro plugin.
+//! Installs the presence companion for Omarchy's stock Quattro lock.
 
 mod quattro;
 
@@ -15,14 +15,7 @@ fn run(command: &mut Command) -> Result<(), String> {
 
 /// # Errors
 ///
-/// Returns an error when Quattro integration is unavailable or cannot be applied.
+/// Returns an error when the required Quattro integration cannot be applied.
 pub fn setup_omarchy() -> Result<(), String> {
-    let commands = Command::new("omarchy")
-        .args(["commands", "--all"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if String::from_utf8_lossy(&commands.stdout).contains("omarchy plugin clone") {
-        return quattro::setup();
-    }
-    Err("this Omarchy build does not support the required Quattro lock-screen integration".into())
+    quattro::setup()
 }
