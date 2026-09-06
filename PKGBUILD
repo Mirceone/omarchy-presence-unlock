@@ -10,8 +10,8 @@ backup=('etc/pam.d/omarchy-lock-presence')
 depends=('bluez' 'pam' 'omarchy' 'hyprland' 'systemd')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Replace with the release digest after the v0.1.0 tag is pushed.
-sha256sums=('SKIP')
+sha256sums=('879858aa19665a02ce62fdcc5094049f3c09e45eb2d1d1e81ee8f169cd9b1fe3')
+
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
