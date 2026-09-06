@@ -362,6 +362,71 @@ fn problem(screen: &Screen, title: &str, error: &str) -> Action {
 }
 
 // ---------------------------------------------------------------------------
+// Flow step indicators
+// ---------------------------------------------------------------------------
+
+/// Declares the screens of a multi-screen flow, in the order the user meets
+/// them, and derives each screen's step indicator from that one declaration:
+/// position gives the number, the number of declared screens gives the total.
+///
+/// A total written out by hand has to be corrected on every screen at once
+/// whenever a flow gains or loses one, and a screen quoting a stale total is
+/// exactly the kind of mistake nothing fails on. Here the declaration is the
+/// only place either number exists, so adding a screen renumbers the flow and
+/// no screen can name a total the flow does not have.
+macro_rules! flow {
+    (
+        $(#[$flow_doc:meta])*
+        $flow:ident { $($(#[$screen_doc:meta])* $screen:ident),+ $(,)? }
+    ) => {
+        $(#[$flow_doc])*
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        enum $flow {
+            $($(#[$screen_doc])* $screen),+
+        }
+
+        impl $flow {
+            /// Every screen of the flow, in order. The macro writes this from
+            /// the same list that declares the variants, so it cannot fall out
+            /// of step with them.
+            const SCREENS: &'static [Self] = &[$(Self::$screen),+];
+
+            /// `Step N of M`, for [`Frame::title`].
+            fn step(self) -> String {
+                let position = Self::SCREENS
+                    .iter()
+                    .position(|screen| *screen == self)
+                    .expect("every screen is declared in SCREENS")
+                    + 1;
+                format!("Step {position} of {}", Self::SCREENS.len())
+            }
+        }
+    };
+}
+
+flow! {
+    /// The screens of a guided pairing, whichever provider it is for.
+    PairFlow {
+        /// What to tap on the device, before anything is started.
+        Instructions,
+        /// The live pairing checklist.
+        Pairing,
+        /// The enrollment that resulted.
+        Enrolled,
+    }
+}
+
+flow! {
+    /// The screens of the proximity device finder.
+    FinderFlow {
+        /// The scan window.
+        Scan,
+        /// The picker over what the scan found.
+        Pick,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Guided enrollment
 // ---------------------------------------------------------------------------
 
@@ -454,7 +519,7 @@ fn pair_frame(
     let label = provider.label();
     let rank = state.rank();
     let mut frame = screen.frame();
-    frame.title(&format!("Pair {label}"), Some("Step 2 of 3"));
+    frame.title(&format!("Pair {label}"), Some(&PairFlow::Pairing.step()));
     frame.blank();
     milestone(&mut frame, rank, 0, "Bluetooth adapter ready");
     milestone(&mut frame, rank, 1, "Secure pairing monitor ready");
@@ -616,7 +681,10 @@ fn pair_instructions(
 ) -> Result<bool, String> {
     let label = provider.label();
     let mut head = screen.frame();
-    head.title(&format!("Pair {label}"), Some("Step 1 of 3"));
+    head.title(
+        &format!("Pair {label}"),
+        Some(&PairFlow::Instructions.step()),
+    );
     head.blank();
     head.line(provider.guide().summary);
     head.blank();
@@ -643,7 +711,7 @@ fn pair_success_frame(
 ) -> Frame {
     let label = provider.label();
     let mut frame = screen.frame();
-    frame.title(&format!("{label} enrolled"), Some("Step 3 of 3"));
+    frame.title(&format!("{label} enrolled"), Some(&PairFlow::Enrolled.step()));
     frame.blank();
     frame.mark(Mark::Done, "Pairing completed");
     frame.mark(Mark::Done, "Device identity verified");
@@ -835,7 +903,11 @@ fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Ac
         if !pair_instructions(screen, provider, &advertised_as)? {
             return Ok(false);
         }
-        prime_sudo(screen, &format!("Pair {}", provider.label()), "Step 2 of 3")?;
+        prime_sudo(
+            screen,
+            &format!("Pair {}", provider.label()),
+            &PairFlow::Pairing.step(),
+        )?;
 
         let (state, result, cancelled, daemon) = run_pairing(screen, provider, &advertised_as);
         match result {
@@ -923,7 +995,7 @@ fn run_scan(screen: &Screen) -> (Result<Vec<pairing::Candidate>, String>, bool) 
         move |cancel| pairing::discover(adapter.as_deref(), SCAN_SECS, cancel, &worker_found),
         || {
             let mut frame = screen.frame();
-            frame.title(FINDER_TITLE, Some("Step 1 of 2"));
+            frame.title(FINDER_TITLE, Some(&FinderFlow::Scan.step()));
             frame.blank();
             frame.line("Keep the device awake and close to the computer.");
             frame.blank();
@@ -1119,7 +1191,7 @@ fn find_proximity_device(screen: &Screen) -> Action {
         let back = items.len() - 1;
 
         let mut head = screen.frame();
-        head.title(FINDER_TITLE, Some("Step 2 of 2"));
+        head.title(FINDER_TITLE, Some(&FinderFlow::Pick.step()));
         head.blank();
         if candidates.is_empty() {
             head.line("Nothing was advertising nearby.");
@@ -2117,7 +2189,9 @@ mod tests {
         });
         let lines = pair_success_frame(&screen, enrollment::PROVIDERS[0], &state, &Ok(())).plain();
         assert!(lines[0].starts_with("Apple Watch enrolled"));
-        assert!(lines[0].ends_with("Step 3 of 3"));
+        // Derived, not quoted: the screen must agree with the flow it belongs
+        // to even after the flow gains a screen.
+        assert!(lines[0].ends_with(&PairFlow::Enrolled.step()));
         assert_eq!(
             lines[2..7],
             [
@@ -2131,6 +2205,29 @@ mod tests {
         assert_eq!(lines[7], "  Name       Apple Watch");
         assert_eq!(lines[8], "  ID         apple-watch");
         assert_eq!(lines[9], "  Security   Apple Continuity");
+    }
+
+    /// The point of declaring a flow is that its screens count themselves, so
+    /// the last screen's total is the number of screens the flow declares.
+    #[test]
+    fn a_flow_numbers_its_screens_from_its_own_declaration() {
+        assert_eq!(PairFlow::Instructions.step(), "Step 1 of 3");
+        assert_eq!(PairFlow::Pairing.step(), "Step 2 of 3");
+        assert_eq!(PairFlow::Enrolled.step(), "Step 3 of 3");
+        assert_eq!(FinderFlow::Scan.step(), "Step 1 of 2");
+        assert_eq!(FinderFlow::Pick.step(), "Step 2 of 2");
+
+        for flow in [PairFlow::SCREENS.len(), FinderFlow::SCREENS.len()] {
+            assert!(flow > 1, "a one-screen flow needs no step indicator");
+        }
+        assert!(
+            PairFlow::SCREENS
+                .last()
+                .is_some_and(|last| last.step().ends_with(&format!(
+                    "of {}",
+                    PairFlow::SCREENS.len()
+                )))
+        );
     }
 
     /// A proximity device asserts nothing about its own lock state, and the
