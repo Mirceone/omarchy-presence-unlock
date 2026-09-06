@@ -171,30 +171,43 @@ impl Screen {
         Frame::new(self.term.size().1 as usize)
     }
 
-    /// Paints a frame from the top-left corner.
+    /// The exact sequence a frame paints as.
     ///
-    /// Each line clears its own tail and the frame clears everything below it,
-    /// so this both draws the new screen and erases the old one without the
-    /// blank flash of a full clear.
+    /// Each line clears its own row and the frame clears everything below it,
+    /// so a repaint both draws the new screen and erases the old one without
+    /// the blank flash of a full clear.
     ///
-    /// # Errors
-    ///
-    /// Returns an error when the terminal cannot be written to.
-    pub fn draw(&self, frame: &Frame) -> Result<(), String> {
+    /// A row is cleared *before* its content, never after. A line that exactly
+    /// fills the terminal leaves the cursor on the final column with the wrap
+    /// deferred rather than past the edge, and an erase-to-end-of-line issued
+    /// from there erases that final cell — so clearing afterwards silently ate
+    /// the last character of every full-width line. The title line is built to
+    /// fill the width exactly, which is why the step indicator was losing its
+    /// total.
+    fn paint(frame: &Frame) -> String {
         let mut out = String::with_capacity(1024);
         out.push_str(HIDE_CURSOR);
         out.push_str(HOME);
         for line in &frame.lines {
-            out.push_str(line);
             out.push_str(CLEAR_LINE);
+            out.push_str(line);
             out.push('\n');
         }
         out.push_str(CLEAR_BELOW);
         if let Some((row, column)) = frame.cursor {
             let _ = write!(out, "\x1b[{row};{column}H{SHOW_CURSOR}");
         }
+        out
+    }
+
+    /// Paints a frame from the top-left corner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal cannot be written to.
+    pub fn draw(&self, frame: &Frame) -> Result<(), String> {
         self.term
-            .write_str(&out)
+            .write_str(&Self::paint(frame))
             .and_then(|()| self.term.flush())
             .map_err(|error| error.to_string())
     }
@@ -437,6 +450,31 @@ mod tests {
         frame.title("Pair Apple Watch", Some("Step 1 of 3"));
         let rendered = console::strip_ansi_codes(&frame.lines[0]).to_string();
         assert_eq!(rendered, "Pair Apple Watch  Step 1 of 3");
+    }
+
+    /// The title line is built to fill the terminal exactly, so the erase that
+    /// clears a row must come before its content: issued afterwards it lands
+    /// on the deferred-wrap cursor still sitting in the last column and wipes
+    /// the character there — which is how the step indicator lost its total.
+    #[test]
+    fn a_full_width_line_keeps_its_last_character_when_painted() {
+        let mut frame = Frame::new(40);
+        frame.title("Pair Apple Watch", Some("Step 1 of 3"));
+        let painted = console::strip_ansi_codes(&Screen::paint(&frame)).to_string();
+        assert!(painted.contains("Step 1 of 3"));
+
+        let row = Screen::paint(&frame)
+            .split('\n')
+            .next()
+            .expect("a painted frame has its first line")
+            .to_string();
+        let content = row
+            .rfind(CLEAR_LINE)
+            .expect("every row clears itself before its content");
+        assert!(
+            !row[content + CLEAR_LINE.len()..].contains(CLEAR_LINE),
+            "nothing may erase after the content: {row:?}"
+        );
     }
 
     #[test]
