@@ -44,6 +44,17 @@ done
 
 [[ $(uname -m) == x86_64 ]] || die "this project currently supports x86-64 only"
 
+# Overwriting a packaged file succeeds silently and then rots: pacman reports
+# the file as modified, and the next upgrade replaces this build without
+# saying so. Fail before touching anything instead.
+if command -v pacman >/dev/null 2>&1; then
+  for owned in /usr/bin/omarchy-presence-unlock /usr/lib/security/pam_omarchy_presence_unlock.so; do
+    if package=$(pacman --query --owns --quiet "$owned" 2>/dev/null) && [[ -n $package ]]; then
+      die "the $package package owns $owned; install with pacman instead, or remove it first: sudo pacman -Rns $package"
+    fi
+  done
+fi
+
 cd "$PROJECT_DIR"
 
 required_sources=(

@@ -1668,6 +1668,9 @@ fn live_status(screen: &Screen) -> Action {
 }
 
 /// What removal is about to take, so consent is informed rather than implied.
+///
+/// Ownership of the installed files is not a question for the user: they are
+/// either a package's to remove or nobody's, and the screen states which.
 fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     let mut frame = screen.frame();
     frame.title("Uninstall", None);
@@ -1676,21 +1679,18 @@ fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     frame.blank();
     frame.bullet("the companion plugin, leaving Omarchy's own lock screen in place");
     frame.bullet("the Alt unlock binding");
-    frame.bullet("the presence PAM policy, which asks for sudo");
     frame.bullet("the presence service");
+    let installed = setup::remaining_system_files();
+    if !installed.is_empty() && !setup::packaged() {
+        frame.bullet(&format!(
+            "the {} installed file(s) under /usr and /etc, which needs sudo",
+            installed.len()
+        ));
+    }
     frame.blank();
-    let remaining = setup::remaining_system_files();
-    if !remaining.is_empty() {
-        // Root owns these and a package may too, so removal reports them
-        // rather than deleting them behind the user's back.
-        frame.line(if setup::packaged() {
-            "Installed files belong to a package: remove it with `pacman -Rns omarchy-presence-unlock`.".to_string()
-        } else {
-            format!(
-                "{} installed file(s) under /usr stay; the next screen lists them.",
-                remaining.len()
-            )
-        });
+    if !installed.is_empty() && setup::packaged() {
+        frame.line("The installed files belong to a package, so they stay:");
+        frame.bullet("finish with: pacman -Rns omarchy-presence-unlock");
         frame.blank();
     }
     frame.line(match enrolled {
@@ -1715,17 +1715,13 @@ fn uninstall_report(screen: &Screen, steps: &[setup::Step]) -> Frame {
             },
         );
     }
-    let remaining = setup::remaining_system_files();
-    if !remaining.is_empty() {
+    // Only what removal could not do is left to the user, and each line says
+    // the command that finishes it.
+    let installed = setup::remaining_system_files();
+    if !installed.is_empty() && !setup::packaged() {
         frame.blank();
-        frame.line(if setup::packaged() {
-            "Remove the package to finish: pacman -Rns omarchy-presence-unlock".to_string()
-        } else {
-            "Finish by hand: sudo rm -rf".to_string()
-        });
-        for path in &remaining {
-            frame.bullet(path);
-        }
+        frame.line("Finish by hand:");
+        frame.bullet(&format!("sudo rm -rf {}", installed.join(" ")));
     }
     frame
 }

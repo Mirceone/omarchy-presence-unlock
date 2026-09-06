@@ -138,9 +138,9 @@ enum Commands {
     /// plugin, the Alt binding, and the presence service. Unprivileged, and
     /// safe to rerun after an Omarchy or package update.
     Setup,
-    /// Remove the lock-screen integration, the binding, the PAM policy, and
-    /// the presence service. Installed files under /usr are reported rather
-    /// than deleted: they are root-owned and a package may own them.
+    /// Remove the integration, the binding, and the presence service. The
+    /// installed files go too, unless a package owns them, in which case
+    /// removing the package is what finishes the job.
     Uninstall {
         /// Also delete the enrolled devices and their keys.
         #[arg(long)]
@@ -243,23 +243,24 @@ fn uninstall(forget_devices: bool) -> Result<(), String> {
     } else {
         setup::Enrollment::Keep
     });
+    // A note on a step that succeeded is guidance, not a failure: only the
+    // outcome decides, never the presence of a detail.
     let mut failed = 0;
     for step in &steps {
-        match &step.detail {
-            None => println!("ok: {}", step.label),
-            Some(detail) => {
-                failed += 1;
-                eprintln!("failed: {} — {detail}", step.label);
-            }
+        let line = match &step.detail {
+            Some(detail) => format!("{} — {detail}", step.label),
+            None => step.label.clone(),
+        };
+        if step.ok {
+            println!("ok: {line}");
+        } else {
+            failed += 1;
+            eprintln!("failed: {line}");
         }
     }
     let remaining = setup::remaining_system_files();
-    if !remaining.is_empty() {
-        if setup::packaged() {
-            println!("remove the package to finish: pacman -Rns omarchy-presence-unlock");
-        } else {
-            println!("finish by hand: sudo rm -rf {}", remaining.join(" "));
-        }
+    if !remaining.is_empty() && !setup::packaged() {
+        println!("finish by hand: sudo rm -rf {}", remaining.join(" "));
     }
     if failed == 0 {
         Ok(())

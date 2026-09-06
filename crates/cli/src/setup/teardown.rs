@@ -29,17 +29,21 @@ pub enum Enrollment {
     Forget,
 }
 
-/// Files installed outside this user's home, which only root can remove and
-/// which a package manager may own. The PAM policy is among them: it belongs
-/// to whatever installed the module it names, so removal reports it rather
-/// than deleting a file `pacman` believes it owns.
-const SYSTEM_FILES: [&str; 7] = [
+/// Everything the installer writes outside this user's home.
+///
+/// Complete on purpose: an entry missing here is a file left behind, and a
+/// leftover under a path the package also ships makes `pacman` refuse the
+/// whole transaction as a file conflict. The `/usr/share` directory is listed
+/// rather than its contents so assets from older versions go with it.
+const SYSTEM_FILES: [&str; 9] = [
     "/usr/bin/omarchy-presence-unlock",
     "/usr/bin/presenced",
     "/usr/lib/security/pam_omarchy_presence_unlock.so",
     "/usr/lib/systemd/user/presenced.service",
     "/usr/lib/systemd/user/presenced.path",
     "/usr/share/omarchy-presence-unlock",
+    "/usr/share/doc/omarchy-presence-unlock",
+    "/usr/share/licenses/omarchy-presence-unlock",
     quattro::PAM_POLICY,
 ];
 
@@ -128,10 +132,7 @@ fn forget_enrollment() -> Result<(), String> {
     remove_if_present(&config)
 }
 
-/// The installed files still present, and who owns them.
-///
-/// Reported rather than deleted: these are root-owned, and when a package
-/// manager owns them removing them by hand would leave its database lying.
+/// The installed files still present.
 #[must_use]
 pub fn remaining_system_files() -> Vec<String> {
     SYSTEM_FILES
@@ -141,13 +142,24 @@ pub fn remaining_system_files() -> Vec<String> {
         .collect()
 }
 
-/// True when a package manager owns the installed binary, so removal is its job.
+/// True when a package owns what the installer would otherwise have written.
+///
+/// Ownership decides who removes these files, so it is asked rather than
+/// assumed: deleting a packaged file by hand leaves `pacman`'s database
+/// describing a file that is gone.
 #[must_use]
 pub fn packaged() -> bool {
-    Command::new("pacman")
-        .args(["-Qo", SYSTEM_FILES[0]])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    SYSTEM_FILES.iter().any(|path| {
+        Command::new("pacman")
+            .args(["-Qo", path])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// Deletes the installed files, which needs root because root wrote them.
+fn remove_system_files(paths: &[String]) -> Result<(), String> {
+    super::run(Command::new("sudo").arg("rm").arg("-rf").args(paths))
 }
 
 /// Undoes the integration, the service, and optionally the enrollment.
@@ -186,6 +198,26 @@ pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
     ));
     if matches!(enrollment, Enrollment::Forget) {
         steps.push(step("Forgot the enrolled devices", forget_enrollment()));
+    }
+    // Last, because it deletes the binary this is running from, and because a
+    // failure here must not cost the user-owned steps above.
+    let installed = remaining_system_files();
+    if !installed.is_empty() {
+        steps.push(if packaged() {
+            // Deleting a packaged file by hand would leave pacman's database
+            // describing a file that is gone, so the package manager keeps
+            // the job it already owns.
+            Step {
+                label: "Left the installed files to the package".into(),
+                ok: true,
+                detail: Some("remove them with: pacman -Rns omarchy-presence-unlock".into()),
+            }
+        } else {
+            step(
+                format!("Removed {} installed file(s)", installed.len()),
+                remove_system_files(&installed),
+            )
+        });
     }
     steps
 }
