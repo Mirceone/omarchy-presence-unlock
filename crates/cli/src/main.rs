@@ -138,9 +138,9 @@ enum Commands {
     /// plugin, the Alt binding, and the presence service. Unprivileged, and
     /// safe to rerun after an Omarchy or package update.
     Setup,
-    /// Remove the integration, the binding, and the presence service. The
-    /// installed files go too, unless a package owns them, in which case
-    /// removing the package is what finishes the job.
+    /// Remove the per-user integration: the Omarchy shell plugin, the Alt
+    /// binding, the presence service, and optionally the enrolled devices.
+    /// The program itself is a package; remove it with pacman.
     Uninstall {
         /// Also delete the enrolled devices and their keys.
         #[arg(long)]
@@ -258,10 +258,7 @@ fn uninstall(forget_devices: bool) -> Result<(), String> {
             eprintln!("failed: {line}");
         }
     }
-    let remaining = setup::remaining_system_files();
-    if !remaining.is_empty() && !setup::packaged() {
-        println!("finish by hand: sudo rm -rf {}", remaining.join(" "));
-    }
+    println!("to remove the program itself: sudo pacman -Rns omarchy-presence-unlock");
     if failed == 0 {
         Ok(())
     } else {

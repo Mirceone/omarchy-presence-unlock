@@ -1668,9 +1668,6 @@ fn live_status(screen: &Screen) -> Action {
 }
 
 /// What removal is about to take, so consent is informed rather than implied.
-///
-/// Ownership of the installed files is not a question for the user: they are
-/// either a package's to remove or nobody's, and the screen states which.
 fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     let mut frame = screen.frame();
     frame.title("Uninstall", None);
@@ -1680,19 +1677,12 @@ fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     frame.bullet("the companion plugin, leaving Omarchy's own lock screen in place");
     frame.bullet("the Alt unlock binding");
     frame.bullet("the presence service");
-    let installed = setup::remaining_system_files();
-    if !installed.is_empty() && !setup::packaged() {
-        frame.bullet(&format!(
-            "the {} installed file(s) under /usr and /etc, which needs sudo",
-            installed.len()
-        ));
-    }
     frame.blank();
-    if !installed.is_empty() && setup::packaged() {
-        frame.line("The installed files belong to a package, so they stay:");
-        frame.bullet("finish with: pacman -Rns omarchy-presence-unlock");
-        frame.blank();
-    }
+    // The installed files are a package's, however they were installed, so
+    // this says who removes them rather than offering to.
+    frame.line("The installed program stays; remove it with:");
+    frame.bullet("sudo pacman -Rns omarchy-presence-unlock");
+    frame.blank();
     frame.line(match enrolled {
         0 => "Nothing is enrolled.".to_string(),
         1 => "One device is enrolled.".to_string(),
@@ -1715,14 +1705,9 @@ fn uninstall_report(screen: &Screen, steps: &[setup::Step]) -> Frame {
             },
         );
     }
-    // Only what removal could not do is left to the user, and each line says
-    // the command that finishes it.
-    let installed = setup::remaining_system_files();
-    if !installed.is_empty() && !setup::packaged() {
-        frame.blank();
-        frame.line("Finish by hand:");
-        frame.bullet(&format!("sudo rm -rf {}", installed.join(" ")));
-    }
+    frame.blank();
+    frame.line("To remove the program itself:");
+    frame.bullet("sudo pacman -Rns omarchy-presence-unlock");
     frame
 }
 

@@ -1,0 +1,63 @@
+# Packages the checkout this file lives in, for `install.sh`.
+#
+# The published PKGBUILD at the repository root fetches a release tarball,
+# which is not what someone installing their own working tree wants. Building a
+# package either way means every installed file is owned by pacman, so there is
+# one ownership model and no conflict between a local build and the AUR
+# package: they share a pkgname, and the local pkgver always sorts higher, so
+# pacman treats one as an upgrade of the other.
+
+pkgname=omarchy-presence-unlock
+pkgver=0.1.0.r2.g1c7274f
+pkgrel=1
+pkgdesc='BLE device presence unlock for Omarchy (local build)'
+arch=('x86_64')
+url='https://github.com/mirceone/omarchy-presence-unlock'
+license=('MIT')
+install=../omarchy-presence-unlock.install
+backup=('etc/pam.d/omarchy-lock-presence')
+# No makedepends: this builds with whatever cargo is on the invoking user's
+# PATH, which for rustup or mise is not a pacman package at all. install.sh
+# checks for the toolchain itself. The runtime depends() still apply, and
+# pacman enforces them when the package is installed.
+makedepends=()
+# The sources are the checkout itself, reached through $startdir rather than
+# copied, so a rebuild reuses the existing target directory.
+source=()
+options=('!debug')
+
+_repo() {
+  printf '%s' "$startdir/../.."
+}
+
+pkgver() {
+  cd "$(_repo)"
+  # Sorts above any released version, so installing a local build over the AUR
+  # package is an upgrade rather than a downgrade pacman would refuse.
+  if description=$(git describe --long --tags 2>/dev/null); then
+    printf '%s' "$description" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  else
+    printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
+}
+
+build() {
+  cd "$(_repo)"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --workspace --locked
+}
+
+package() {
+  cd "$(_repo)"
+  install -Dm755 target/release/omarchy-presence-unlock "$pkgdir/usr/bin/omarchy-presence-unlock"
+  install -Dm755 target/release/presenced "$pkgdir/usr/bin/presenced"
+  install -Dm755 target/release/libpam_omarchy_presence_unlock.so "$pkgdir/usr/lib/security/pam_omarchy_presence_unlock.so"
+  install -Dm644 packaging/presenced.service "$pkgdir/usr/lib/systemd/user/presenced.service"
+  install -Dm644 packaging/presenced.path "$pkgdir/usr/lib/systemd/user/presenced.path"
+  install -Dm644 packaging/omarchy-lock-presence.pam "$pkgdir/etc/pam.d/omarchy-lock-presence"
+  install -Dm644 packaging/plugin/manifest.json "$pkgdir/usr/share/omarchy-presence-unlock/plugin/manifest.json"
+  install -Dm644 packaging/plugin/Service.qml "$pkgdir/usr/share/omarchy-presence-unlock/plugin/Service.qml"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

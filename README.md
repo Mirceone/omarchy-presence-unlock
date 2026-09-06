@@ -14,10 +14,10 @@ Then run `omarchy-presence-unlock` to enroll a device. An Apple Watch or a phone
 pairs by picking this computer on the device itself; anything else is enrolled
 by proximity. `Run diagnostics` reports what is wired up.
 
-The installer writes the system files itself, so they belong to no package.
-To switch to a packaged install later, run `omarchy-presence-unlock uninstall`
-first: it removes those files, and the package can then own them. Going the
-other way is refused rather than allowed to overwrite a package's files.
+The installer builds a package and hands it to pacman, so the installed files
+have one owner however you got them. Remove the program with
+`sudo pacman -Rns omarchy-presence-unlock`, and the per-user integration with
+`omarchy-presence-unlock uninstall`.
 
 ## How it works
 

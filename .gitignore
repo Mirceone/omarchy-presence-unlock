@@ -1,3 +1,6 @@
 /target/
 /pocs/
 .DS_Store
+packaging/local/*.pkg.tar.zst
+packaging/local/src/
+packaging/local/pkg/

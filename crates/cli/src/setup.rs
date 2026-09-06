@@ -3,7 +3,7 @@
 mod quattro;
 mod teardown;
 
-pub use teardown::{Enrollment, Step, packaged, remaining_system_files, uninstall};
+pub use teardown::{Enrollment, Step, uninstall};
 
 use std::process::Command;
 
