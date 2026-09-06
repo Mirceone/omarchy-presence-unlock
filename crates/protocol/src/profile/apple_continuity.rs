@@ -50,8 +50,7 @@ mod tests {
         // watch-specific capability bit is absent, but the lock bit is clear
         // and the general auto-unlock bit is set.
         let observed_unlocked = frame(0x98);
-        let all_capabilities =
-            frame(apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED);
+        let all_capabilities = frame(apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED);
         let locked = frame(
             apple::WATCH_AUTO_UNLOCK_ENABLED | apple::AUTO_UNLOCK_ENABLED | apple::WATCH_LOCKED,
         );

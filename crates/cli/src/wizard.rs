@@ -711,7 +711,10 @@ fn pair_success_frame(
 ) -> Frame {
     let label = provider.label();
     let mut frame = screen.frame();
-    frame.title(&format!("{label} enrolled"), Some(&PairFlow::Enrolled.step()));
+    frame.title(
+        &format!("{label} enrolled"),
+        Some(&PairFlow::Enrolled.step()),
+    );
     frame.blank();
     frame.mark(Mark::Done, "Pairing completed");
     frame.mark(Mark::Done, "Device identity verified");
@@ -1612,7 +1615,6 @@ fn device_status_words(
     }
 }
 
-
 fn live_status_frame(
     screen: &Screen,
     rows: &[wire::DeviceRow<'_>],
@@ -2242,14 +2244,10 @@ mod tests {
         for flow in [PairFlow::SCREENS.len(), FinderFlow::SCREENS.len()] {
             assert!(flow > 1, "a one-screen flow needs no step indicator");
         }
-        assert!(
-            PairFlow::SCREENS
-                .last()
-                .is_some_and(|last| last.step().ends_with(&format!(
-                    "of {}",
-                    PairFlow::SCREENS.len()
-                )))
-        );
+        assert!(PairFlow::SCREENS.last().is_some_and(|last| {
+            last.step()
+                .ends_with(&format!("of {}", PairFlow::SCREENS.len()))
+        }));
     }
 
     /// A proximity device asserts nothing about its own lock state, and the

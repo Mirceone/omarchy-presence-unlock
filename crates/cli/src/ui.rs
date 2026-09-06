@@ -84,7 +84,6 @@ impl Frame {
         }
     }
 
-
     /// The screen title, with an optional step indicator pushed to the right
     /// margin so a multi-step flow always says where the user is.
     pub fn title(&mut self, title: &str, step: Option<&str>) {
@@ -497,10 +496,7 @@ mod tests {
 
         let painted = Screen::paint(&frame);
         let rows = painted.split('\n').collect::<Vec<_>>();
-        assert_eq!(
-            console::strip_ansi_codes(rows[0]).trim_start(),
-            "12345"
-        );
+        assert_eq!(console::strip_ansi_codes(rows[0]).trim_start(), "12345");
         assert!(
             rows[0].contains("\x1b[0m"),
             "clipping must reset an active style: {:?}",
