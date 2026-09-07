@@ -4,20 +4,33 @@ Unlock an Omarchy desktop by holding Alt when a trusted Bluetooth device is
 nearby. Presence only authorizes the request; releasing the lock screen still
 takes a deliberate gesture, so nothing unlocks on its own.
 
-## Install
+## Install and set up
+
+Run the installer as your normal desktop user, without `sudo`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
 ```
 
-Then run `omarchy-presence-unlock` to enroll a device. An Apple Watch or a phone
-pairs by picking this computer on the device itself; anything else is enrolled
-by proximity. `Run diagnostics` reports what is wired up.
+It builds a native package, asks for `sudo` only when pacman installs it, and
+sets up the integration automatically when run inside your logged-in Omarchy
+session. If you installed over SSH or outside that session, finish setup after
+logging in:
 
-The installer builds a package and hands it to pacman, so the installed files
-have one owner however you got them. Remove the program with
-`sudo pacman -Rns omarchy-presence-unlock`, and the per-user integration with
-`omarchy-presence-unlock uninstall`.
+```sh
+omarchy-presence-unlock setup
+```
+
+Then open the menu to enroll a device and run diagnostics:
+
+```sh
+omarchy-presence-unlock
+```
+
+An Apple Watch or phone pairs by selecting this computer on the device itself;
+other devices are enrolled by proximity. The installer is safe to rerun for
+updates. To remove everything, first run `omarchy-presence-unlock uninstall`,
+then `sudo pacman -Rns omarchy-presence-unlock`.
 
 ## How it works
 
