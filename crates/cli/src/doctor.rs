@@ -14,14 +14,17 @@ use std::{
     time::Duration,
 };
 
-const PLUGIN_ID: &str = "presence.unlock";
 const STOCK_PLUGIN_ID: &str = "omarchy.lock";
-const SERVICE_MARKER: &str = "// omarchy-presence-unlock:companion";
+/// Written into the generated lock by `setup::lock`. Its absence means the
+/// enabled lock is not this integration, whatever else is in place.
+const PRESENCE_MARKER: &str = "// omarchy-presence-unlock:presence";
 const BINDING_MARKER: &str = "-- omarchy-presence-unlock:start";
 const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
 
-struct QuattroIntegration {
+struct LockIntegration {
+    plugin_id: String,
     service: PathBuf,
+    view: PathBuf,
     bindings: PathBuf,
 }
 
@@ -96,10 +99,15 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
         ),
     );
 
-    validate_quattro(quattro_integration().as_ref())?;
+    let integration = lock_integration();
+    validate_lock(integration.as_ref())?;
+    let plugin_id = integration.map_or_else(
+        || STOCK_PLUGIN_ID.to_string(),
+        |integration| integration.plugin_id,
+    );
     pass(
         checks,
-        format!("companion plugin {PLUGIN_ID} with stock lock {STOCK_PLUGIN_ID}"),
+        format!("presence lock {plugin_id}, cloned from {STOCK_PLUGIN_ID}"),
     );
     pass(checks, "Alt hold/release binding".to_string());
     pass(checks, format!("presence PAM policy {PAM_POLICY}"));
@@ -156,32 +164,44 @@ fn pass(checks: &mut Vec<Check>, label: String) {
     checks.push(Check { ok: true, label });
 }
 
-fn quattro_integration() -> Option<QuattroIntegration> {
+/// Where the generated lock should be, named the way setup names it.
+fn lock_integration() -> Option<LockIntegration> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    Some(QuattroIntegration {
-        service: home
-            .join(".config/omarchy/plugins")
-            .join(PLUGIN_ID)
-            .join("Service.qml"),
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()?;
+    let plugin_id = format!("{}.lock", user.trim());
+    let directory = home.join(".config/omarchy/plugins").join(&plugin_id);
+    Some(LockIntegration {
+        plugin_id,
+        service: directory.join("Service.qml"),
+        view: directory.join("LockView.qml"),
         bindings: home.join(".config/hypr/bindings.lua"),
     })
 }
 
-fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), String> {
+fn validate_lock(integration: Option<&LockIntegration>) -> Result<(), String> {
     let integration = integration.ok_or(
-        "the Quattro integration path cannot be resolved; run `omarchy-presence-unlock setup`",
+        "the lock integration path cannot be resolved; run `omarchy-presence-unlock setup`",
     )?;
-    let service = fs::read_to_string(&integration.service).map_err(|_| {
-        format!(
-            "presence companion service {} is missing; run `omarchy-presence-unlock setup`",
-            integration.service.display()
-        )
-    })?;
-    if !service.contains(SERVICE_MARKER) {
-        return Err(
-            "the installed companion plugin is not the current presence integration; rerun `omarchy-presence-unlock setup`"
-                .into(),
-        );
+    let plugin_id = &integration.plugin_id;
+
+    for asset in [&integration.service, &integration.view] {
+        let contents = fs::read_to_string(asset).map_err(|_| {
+            format!(
+                "the presence lock is missing {}; run `omarchy-presence-unlock setup`",
+                asset.display()
+            )
+        })?;
+        // Both halves are generated: the service authenticates, the view is
+        // what tells the user the gesture exists. One without the other is a
+        // stale clone from a partial install or an interrupted update.
+        if !contents.contains(PRESENCE_MARKER) {
+            return Err(format!(
+                "{} carries no presence code; rerun `omarchy-presence-unlock setup`",
+                asset.display()
+            ));
+        }
     }
 
     let bindings = fs::read_to_string(&integration.bindings).map_err(|_| {
@@ -213,19 +233,22 @@ fn validate_quattro(integration: Option<&QuattroIntegration>) -> Result<(), Stri
             "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup`"
         ));
     }
-    if !plugin_is_enabled(PLUGIN_ID) {
+    if !plugin_is_enabled(plugin_id) {
         return Err(format!(
-            "companion plugin {PLUGIN_ID} is not enabled; run `omarchy plugin enable {PLUGIN_ID}`"
+            "the presence lock {plugin_id} is not enabled; run `omarchy plugin enable {plugin_id}`"
         ));
     }
-    if !plugin_is_enabled(STOCK_PLUGIN_ID) {
+    // The clone replaces the built-in, so the shell reports the built-in as
+    // disabled. Both enabled at once would mean the clone is not registered
+    // as its replacement, and the wrong lock could answer.
+    if plugin_is_enabled(STOCK_PLUGIN_ID) {
         return Err(format!(
-            "stock lock plugin {STOCK_PLUGIN_ID} is not enabled; rerun `omarchy-presence-unlock setup`"
+            "both {plugin_id} and {STOCK_PLUGIN_ID} are enabled; rerun `omarchy-presence-unlock setup`"
         ));
     }
-    if !companion_responds() {
+    if !presence_responds() {
         return Err(
-            "the presence companion IPC target is unavailable; run `omarchy restart shell` and retry"
+            "the presence unlock IPC target is unavailable; run `omarchy restart shell` and retry"
                 .into(),
         );
     }
@@ -253,7 +276,8 @@ fn plugin_enabled_in(listing: &[u8], plugin_id: &str) -> bool {
     })
 }
 
-fn companion_responds() -> bool {
+/// Whether the running lock answers the gesture the Alt binding sends.
+fn presence_responds() -> bool {
     Command::new("omarchy-shell")
         .args(["presence-unlock", "ping"])
         .output()
@@ -273,11 +297,13 @@ fn user_service_state() -> String {
 mod tests {
     use super::*;
 
+    /// The clone replaces the built-in, so a healthy machine reports exactly
+    /// one of them enabled — which is what `validate_lock` asserts on.
     #[test]
     fn plugin_listing_detects_only_the_enabled_target() {
         let listing =
-            br#"[{"id":"presence.unlock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
-        assert!(plugin_enabled_in(listing, PLUGIN_ID));
+            br#"[{"id":"tester.lock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
+        assert!(plugin_enabled_in(listing, "tester.lock"));
         assert!(!plugin_enabled_in(listing, STOCK_PLUGIN_ID));
         assert!(!plugin_enabled_in(listing, "bob.lock"));
     }

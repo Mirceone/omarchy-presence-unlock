@@ -62,8 +62,6 @@ required_sources=(
   packaging/presenced.service
   packaging/presenced.path
   packaging/omarchy-lock-presence.pam
-  packaging/plugin/manifest.json
-  packaging/plugin/Service.qml
   README.md
   LICENSE
 )

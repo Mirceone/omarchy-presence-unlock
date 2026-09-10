@@ -1770,7 +1770,8 @@ fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     frame.blank();
     frame.line("This removes:");
     frame.blank();
-    frame.bullet("the companion plugin, leaving Omarchy's own lock screen in place");
+    frame.bullet("the presence lock plugin, restoring Omarchy's own lock screen");
+    frame.bullet("the Omarchy menu entry");
     frame.bullet("the Alt unlock binding");
     frame.bullet("the presence service");
     frame.blank();

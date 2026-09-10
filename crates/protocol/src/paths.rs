@@ -1,4 +1,4 @@
-//! One derivation each for the control socket, the config file, and installed data.
+//! One derivation each for the control socket and the config file.
 //!
 //! Every consumer must agree on these paths: the PAM module cannot trust the
 //! caller's environment, so a daemon that derives its socket from
@@ -6,9 +6,6 @@
 
 use nix::unistd::Uid;
 use std::{env, path::PathBuf};
-
-/// Where packaging installs read-only data assets.
-pub const DEFAULT_DATADIR: &str = "/usr/share/omarchy-presence-unlock";
 
 /// Canonical control-socket directory for `uid`.
 ///
@@ -31,18 +28,6 @@ pub fn current_socket_dir() -> PathBuf {
 #[must_use]
 pub fn current_socket_path() -> PathBuf {
     socket_path(Uid::current().as_raw())
-}
-
-/// `$OPU_DATADIR` if set, otherwise [`DEFAULT_DATADIR`].
-#[must_use]
-pub fn datadir() -> PathBuf {
-    env::var_os("OPU_DATADIR").map_or_else(|| PathBuf::from(DEFAULT_DATADIR), PathBuf::from)
-}
-
-/// The self-contained Omarchy service plugin shipped by packaging.
-#[must_use]
-pub fn shell_plugin_source() -> PathBuf {
-    datadir().join("plugin")
 }
 
 /// `$XDG_CONFIG_HOME/omarchy-presence-unlock`, else `$HOME/.config/omarchy-presence-unlock`.
@@ -99,18 +84,6 @@ mod tests {
             PathBuf::from("/run/user/1000/omarchy-presence-unlock/control.sock")
         );
         assert_eq!(socket_path(1000), socket_dir(1000).join("control.sock"));
-    }
-
-    #[test]
-    fn datadir_defaults_when_the_override_is_absent() {
-        // SAFETY-free: this test only reads when OPU_DATADIR is unset in the harness.
-        if env::var_os("OPU_DATADIR").is_none() {
-            assert_eq!(datadir(), PathBuf::from(DEFAULT_DATADIR));
-            assert_eq!(
-                shell_plugin_source(),
-                PathBuf::from(DEFAULT_DATADIR).join("plugin")
-            );
-        }
     }
 
     #[test]
