@@ -33,7 +33,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::devices::{self, Criteria, Overrides};
+use crate::devices;
 use crate::enrollment::{Cleanup, Phase, Progress, Sink};
 
 /// How long a bond attempt may take before the `pair()` future is dropped,
@@ -556,21 +556,7 @@ async fn extract_and_report(
     if !alias.unwrap_or_default().contains("Watch") {
         println!("warning: this device does not look like an Apple Watch, but saving it as one");
     }
-    // Base64 of the file-order bytes: config::decode_irk applies the single
-    // reversal that turns them into an AES key. A second one here would break it.
-    devices::add(
-        id,
-        "apple-continuity",
-        &Criteria {
-            irk_base64: Some(STANDARD.encode(irk)),
-            ..Criteria::default()
-        },
-        &Overrides {
-            threshold_dbm: None,
-            minimum_samples: None,
-            freshness_ms: None,
-        },
-    )?;
+    devices::enroll_irk(&irk, "apple-continuity", Some(id), None)?;
     println!("enrolled {id}; restart presenced");
     Ok(())
 }
@@ -850,27 +836,7 @@ fn save_capture(
     if !save {
         return Ok(());
     }
-    let irk_base64 = STANDARD.encode(capture.key);
-    // The same device enrolled twice is one device, not two: its key already
-    // names an entry, and a second entry holding it would let one radio packet
-    // satisfy a rule the user set expecting two devices.
-    let id = id
-        .map(str::to_string)
-        .or_else(|| devices::id_for_irk(&irk_base64))
-        .unwrap_or_else(|| devices::derive_id(name, None));
-    devices::add(
-        &id,
-        profile,
-        &Criteria {
-            irk_base64: Some(irk_base64),
-            ..Criteria::default()
-        },
-        &Overrides {
-            threshold_dbm: None,
-            minimum_samples: None,
-            freshness_ms: None,
-        },
-    )?;
+    let id = devices::enroll_irk(&capture.key, profile, id, name)?;
     progress(Progress::Enrolled { id, name: reported });
     Ok(())
 }

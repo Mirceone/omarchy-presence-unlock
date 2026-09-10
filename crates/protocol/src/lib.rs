@@ -29,5 +29,6 @@ pub use identity::Identity;
 pub use irk::IrkMatcher;
 pub use presence::{
     Decision, Device, DeviceSpec, DeviceStatus, Eligibility, Fleet, MultiDeviceAuth, Policy,
+    PolicyClamp,
 };
 pub use profile::{Observation, Profile};

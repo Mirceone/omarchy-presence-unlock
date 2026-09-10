@@ -7,7 +7,7 @@ use crate::{
     ble::parse_address,
     identity::Identity,
     paths,
-    presence::{DeviceSpec, MultiDeviceAuth, Policy},
+    presence::{DeviceSpec, MultiDeviceAuth, Policy, PolicyClamp},
     profile::Profile,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -243,17 +243,24 @@ impl DeviceEntry {
         Ok(identity)
     }
 
-    fn policy(&self) -> Policy {
+    fn requested_policy(&self) -> Policy {
         let default = Policy::default();
         Policy {
             threshold_dbm: self.threshold_dbm.unwrap_or(default.threshold_dbm),
-            minimum_samples: self
-                .minimum_samples
-                .unwrap_or(default.minimum_samples)
-                .max(1),
+            minimum_samples: self.minimum_samples.unwrap_or(default.minimum_samples),
             sample_window_ms: self.sample_window_ms.unwrap_or(default.sample_window_ms),
             freshness_ms: self.freshness_ms.unwrap_or(default.freshness_ms),
         }
+    }
+
+    fn policy(&self) -> Policy {
+        self.requested_policy().clamped().0
+    }
+
+    /// Policy fields this device asked for and did not get.
+    #[must_use]
+    pub fn policy_clamps(&self) -> Vec<PolicyClamp> {
+        self.requested_policy().clamped().1
     }
 
     /// # Errors

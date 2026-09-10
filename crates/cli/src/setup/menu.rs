@@ -12,8 +12,7 @@
 //! and rewritten, which would throw those comments away.
 
 use super::paths;
-use crate::atomic::write_atomic;
-use std::fs;
+use crate::atomic::update_atomic;
 
 pub(super) const BLOCK_START: &str = "// omarchy-presence-unlock:menu:start";
 pub(super) const BLOCK_END: &str = "// omarchy-presence-unlock:menu:end";
@@ -25,38 +24,55 @@ pub(super) const REMOVE_ENTRY_ID: &str = "remove.security.presence";
 const ICON: &str = "\u{f0990}";
 
 /// Whether the lock plugin is installed, as a shell condition the menu can
-/// evaluate. The rows are complementary on it, so exactly one appears under
-/// Setup: apply it, or open it.
-const APPLIED: &str = "[ -d \\\"$HOME/.config/omarchy/plugins/${USER}.lock\\\" ]";
+/// evaluate.
+const APPLIED: &str = "[ -d \"$HOME/.config/omarchy/plugins/${USER}.lock\" ]";
 
+#[derive(Clone, Copy)]
+enum Integration {
+    Applied,
+    Unapplied,
+}
+
+fn presence_when(state: Integration) -> String {
+    let installed = "command -v omarchy-presence-unlock >/dev/null";
+    let applied = match state {
+        Integration::Applied => APPLIED.to_string(),
+        Integration::Unapplied => format!("! {APPLIED}"),
+    };
+    format!("{installed} && {applied}")
+}
+
+/// The condition is shell, so it carries quotes of its own; they are escaped
+/// here rather than written pre-escaped, so the condition stays comparable to
+/// what the menu will evaluate.
 fn row(id: &str, label: &str, description: &str, when: &str, command: &str) -> String {
+    let when = when.replace('"', "\\\"");
     format!(
         "  \"{id}\": {{\"icon\":\"{ICON}\",\"label\":\"{label}\",\"description\":\"{description}\",\"when\":\"{when}\",\"action\":\"omarchy-launch-floating-terminal-with-presentation {command}\"}}"
     )
 }
 
 fn block() -> String {
-    let installed = "command -v omarchy-presence-unlock >/dev/null";
     let rows = [
         row(
             SETUP_ENTRY_ID,
             "Presence Unlock",
             "Set up unlocking with a trusted Bluetooth device",
-            &format!("{installed} && ! {APPLIED}"),
+            &presence_when(Integration::Unapplied),
             "omarchy-presence-unlock setup",
         ),
         row(
             MANAGE_ENTRY_ID,
             "Presence Unlock",
             "Enroll a trusted device, manage presence unlock, and run diagnostics",
-            &format!("{installed} && {APPLIED}"),
+            &presence_when(Integration::Applied),
             "omarchy-presence-unlock",
         ),
         row(
             REMOVE_ENTRY_ID,
             "Presence Unlock",
             "Remove presence unlock and restore Omarchy's own lock screen",
-            &format!("{installed} && {APPLIED}"),
+            &presence_when(Integration::Applied),
             "omarchy-presence-unlock uninstall",
         ),
     ];
@@ -183,18 +199,7 @@ pub(super) fn render_entry(source: &str) -> Result<String, String> {
 /// Returns an error when the menu extension cannot be read or written.
 pub(super) fn install() -> Result<(), String> {
     let path = paths::menu_extensions_path()?;
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => EMPTY_EXTENSIONS.to_string(),
-        Err(error) => return Err(error.to_string()),
-    };
-    let rendered = render_entry(&source)?;
-    if rendered == source && path.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(path.parent().ok_or("invalid menu extension path")?)
-        .map_err(|error| error.to_string())?;
-    write_atomic(&path, &rendered, 0o644)
+    update_atomic(&path, EMPTY_EXTENSIONS, 0o644, render_entry)
 }
 
 /// # Errors
@@ -202,14 +207,7 @@ pub(super) fn install() -> Result<(), String> {
 /// Returns an error when the menu extension cannot be rewritten.
 pub(super) fn remove() -> Result<(), String> {
     let path = paths::menu_extensions_path()?;
-    let Ok(source) = fs::read_to_string(&path) else {
-        return Ok(());
-    };
-    let rendered = render_removal(&source)?;
-    if rendered == source {
-        return Ok(());
-    }
-    write_atomic(&path, &rendered, 0o644)
+    update_atomic(&path, EMPTY_EXTENSIONS, 0o644, render_removal)
 }
 
 #[cfg(test)]
@@ -260,7 +258,8 @@ mod tests {
         // visible, decided by whether the integration is applied.
         let setup_when = parsed[SETUP_ENTRY_ID]["when"].as_str().unwrap();
         let manage_when = parsed[MANAGE_ENTRY_ID]["when"].as_str().unwrap();
-        assert_eq!(setup_when.replace("&& ! ", "&& "), manage_when);
+        assert_eq!(setup_when, presence_when(Integration::Unapplied));
+        assert_eq!(manage_when, presence_when(Integration::Applied));
         // Removal is only offered once there is something to remove.
         assert_eq!(parsed[REMOVE_ENTRY_ID]["when"], manage_when);
         assert!(rendered.contains("// Extend the menu with JSONC."));

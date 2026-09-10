@@ -1,14 +1,14 @@
-//! Compile-time enrollment provider registry.
+//! Compile-time enrollment catalog.
 //!
-//! Profiles describe runtime advertisement semantics in the protocol crate;
-//! providers obtain the credentials needed by one of those profiles. Keeping the
-//! registries separate lets several enrollment transports target the same profile.
+//! Profiles describe runtime advertisement semantics in the protocol crate; each
+//! catalog entry supplies the guided copy and the enrollment data for one device.
 
-mod apple_watch;
 pub(crate) mod mgmt;
-mod phone;
 
-use omarchy_presence_unlock_protocol::Profile;
+use omarchy_presence_unlock_protocol::{
+    Profile,
+    profile::{APPLE_CONTINUITY, PRESENCE},
+};
 
 /// How far an enrollment has got, reported as it happens.
 ///
@@ -146,31 +146,16 @@ pub struct Guide {
     pub hint: &'static str,
 }
 
+/// One enrollment option, including the data shared transport consumes.
 pub struct Provider {
     id: &'static str,
     profile: &'static Profile,
+    fallback: &'static str,
     guide: Guide,
     description: &'static str,
-    run: for<'a> fn(&Request<'a>) -> Result<(), String>,
 }
 
 impl Provider {
-    pub const fn new(
-        id: &'static str,
-        profile: &'static Profile,
-        guide: Guide,
-        description: &'static str,
-        run: for<'a> fn(&Request<'a>) -> Result<(), String>,
-    ) -> Self {
-        Self {
-            id,
-            profile,
-            guide,
-            description,
-            run,
-        }
-    }
-
     #[must_use]
     pub const fn id(&self) -> &'static str {
         self.id
@@ -197,7 +182,47 @@ impl Provider {
     }
 }
 
-pub static PROVIDERS: [&Provider; 2] = [&apple_watch::PROVIDER, &phone::PROVIDER];
+static APPLE_WATCH_STEPS: [&str; 4] = [
+    "Open Settings",
+    "Select Bluetooth",
+    "Select Health Devices",
+    "Tap “{name}”",
+];
+
+static PHONE_STEPS: [&str; 4] = [
+    "Open Settings",
+    "Select Bluetooth",
+    "Look under “Other Devices”",
+    "Tap “{name}”",
+];
+
+static APPLE_WATCH: Provider = Provider {
+    id: "apple-watch",
+    profile: APPLE_CONTINUITY,
+    fallback: "watch",
+    guide: Guide {
+        label: "Apple Watch",
+        summary: "Your computer will appear as a heart-rate sensor.",
+        steps: &APPLE_WATCH_STEPS,
+        hint: "Open Settings → Bluetooth → Health Devices on the Watch.",
+    },
+    description: "Advertise a Heart Rate peripheral and capture the Watch IRK during SMP",
+};
+
+static PHONE: Provider = Provider {
+    id: "phone",
+    profile: PRESENCE,
+    fallback: "phone",
+    guide: Guide {
+        label: "Phone",
+        summary: "Your computer will appear as a pairable Bluetooth accessory.",
+        steps: &PHONE_STEPS,
+        hint: "Open Settings → Bluetooth on the phone and tap this computer under Other Devices.",
+    },
+    description: "Advertise this computer as pairable and capture the phone IRK during SMP",
+};
+
+pub static PROVIDERS: [&Provider; 2] = [&APPLE_WATCH, &PHONE];
 
 #[must_use]
 pub fn find(id: &str) -> Option<&'static Provider> {
@@ -213,7 +238,18 @@ pub fn enroll(provider: &str, request: &Request<'_>) -> Result<(), String> {
             .join(", ");
         format!("unknown enrollment provider {provider}; supported: {supported}")
     })?;
-    (provider.run)(request)
+    crate::pairing::capture_peripheral(
+        &crate::pairing::Enrollment {
+            profile: provider.profile().id(),
+            fallback: provider.fallback,
+            id: request.id,
+            save: request.save,
+        },
+        request.adapter,
+        request.timeout_secs,
+        request.cancel,
+        request.progress,
+    )
 }
 
 pub fn print_catalog() {
@@ -310,6 +346,23 @@ mod tests {
         assert!(!phone.profile().attests_device_state());
         let watch = find("apple-watch").expect("the Apple Watch provider is registered");
         assert!(watch.profile().attests_device_state());
+    }
+
+    /// The catalog is the sole construction site, so these are the exact
+    /// profile and fallback values passed into the shared pairing transport.
+    #[test]
+    fn catalog_preserves_each_enrollment_value() {
+        let values: Vec<_> = PROVIDERS
+            .iter()
+            .map(|provider| (provider.id(), provider.profile().id(), provider.fallback))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("apple-watch", "apple-continuity", "watch"),
+                ("phone", "presence", "phone"),
+            ]
+        );
     }
 
     /// Several candidates can be on a phone's Bluetooth screen at once, so the

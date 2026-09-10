@@ -14,3 +14,4 @@ workspace = true
 nix = { workspace = true, features = ["user"] }
 omarchy-presence-unlock-protocol = { path = "../protocol", default-features = false }
 pam.workspace = true
+socket2.workspace = true

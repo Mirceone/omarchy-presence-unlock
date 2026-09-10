@@ -99,6 +99,27 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
         ),
     );
 
+    for device in &config.devices {
+        if let Some(clamp) = device.policy_clamps().first() {
+            return Err(format!(
+                "device {}: {} = {} is outside the supported range and was reduced to {}; edit {}",
+                device.id,
+                clamp.field,
+                clamp.requested,
+                clamp.applied,
+                path.display()
+            ));
+        }
+    }
+    adapter_is_usable(config.adapter.as_deref())?;
+    pass(
+        checks,
+        format!(
+            "Bluetooth adapter {} powered",
+            config.adapter.as_deref().unwrap_or("hci0")
+        ),
+    );
+
     let integration = lock_integration();
     validate_lock(integration.as_ref())?;
     let plugin_id = integration.map_or_else(
@@ -282,6 +303,35 @@ fn presence_responds() -> bool {
         .args(["presence-unlock", "ping"])
         .output()
         .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"ok")
+}
+
+/// The daemon and the enrollment flows both fail on an unpowered adapter, and
+/// both fail late, inside a scan that simply never sees anything. Asked over
+/// D-Bus rather than through `bluetoothctl`, which `BlueZ` splits into a
+/// separate package this one does not depend on.
+fn adapter_is_usable(adapter: Option<&str>) -> Result<(), String> {
+    let adapter = adapter.unwrap_or("hci0");
+    let output = Command::new("busctl")
+        .args([
+            "get-property",
+            "org.bluez",
+            &format!("/org/bluez/{adapter}"),
+            "org.bluez.Adapter1",
+            "Powered",
+        ])
+        .output()
+        .map_err(|error| format!("busctl is required to query BlueZ: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "BlueZ does not expose adapter {adapter}; run `sudo systemctl start bluetooth` or set `adapter` in the config"
+        ));
+    }
+    if String::from_utf8_lossy(&output.stdout).trim() != "b true" {
+        return Err(format!(
+            "Bluetooth adapter {adapter} is not powered; run `bluetoothctl power on`"
+        ));
+    }
+    Ok(())
 }
 
 fn user_service_state() -> String {

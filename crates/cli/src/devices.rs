@@ -60,6 +60,44 @@ pub fn id_for_irk(irk_base64: &str) -> Option<String> {
         .map(|entry| entry.id)
 }
 
+/// The one place a captured key becomes an enrolled device.
+///
+/// The bytes are stored in `BlueZ` file order, because `config::decode_irk`
+/// applies the single reversal that turns them into an AES key; a second
+/// encoding site is a second chance to reverse them twice. Enrolling is also
+/// where the key decides the id, so the same peer captured again updates its
+/// entry instead of gaining a twin.
+///
+/// # Errors
+///
+/// Returns whatever writing the config returns.
+pub fn enroll_irk(
+    irk: &[u8; 16],
+    profile: &str,
+    id: Option<&str>,
+    name: Option<&str>,
+) -> Result<String, String> {
+    let irk_base64 = base64::engine::general_purpose::STANDARD.encode(irk);
+    let id = id
+        .map(str::to_string)
+        .or_else(|| id_for_irk(&irk_base64))
+        .unwrap_or_else(|| derive_id(name, None));
+    add(
+        &id,
+        profile,
+        &Criteria {
+            irk_base64: Some(irk_base64),
+            ..Criteria::default()
+        },
+        &Overrides {
+            threshold_dbm: None,
+            minimum_samples: None,
+            freshness_ms: None,
+        },
+    )?;
+    Ok(id)
+}
+
 /// The device id is the config's primary key, not a label: [`add`] upserts on
 /// it, `status` prints it, and removal addresses devices by it. It is the
 /// app's to choose — the user is never asked.

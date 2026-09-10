@@ -7,8 +7,8 @@
 //! added.
 
 use super::paths;
-use crate::atomic::write_atomic;
-use std::{fs, process::Command};
+use crate::atomic::update_atomic;
+use std::process::Command;
 
 pub(super) const BLOCK_START: &str = "-- omarchy-presence-unlock:start";
 pub(super) const BLOCK_END: &str = "-- omarchy-presence-unlock:end";
@@ -65,18 +65,7 @@ fn render(source: &str) -> Result<String, String> {
 /// Returns an error when the bindings file cannot be read or written.
 pub(super) fn install() -> Result<(), String> {
     let path = paths::bindings_path()?;
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.to_string()),
-    };
-    let rendered = render(&source)?;
-    if rendered == source {
-        return Ok(());
-    }
-    fs::create_dir_all(path.parent().ok_or("invalid Hyprland bindings path")?)
-        .map_err(|error| error.to_string())?;
-    write_atomic(&path, &rendered, 0o644)
+    update_atomic(&path, "", 0o644, render)
 }
 
 /// # Errors
@@ -84,24 +73,22 @@ pub(super) fn install() -> Result<(), String> {
 /// Returns an error when the block is malformed or cannot be written back.
 pub(super) fn remove() -> Result<(), String> {
     let path = paths::bindings_path()?;
-    let Ok(source) = fs::read_to_string(&path) else {
-        return Ok(());
-    };
-    let (Some(start), Some(end)) = (source.find(BLOCK_START), source.find(BLOCK_END)) else {
-        return Ok(());
-    };
-    if start > end {
-        return Err(format!(
-            "{} contains a malformed presence-unlock block; remove it by hand",
-            path.display()
-        ));
-    }
-    let mut rendered = source.clone();
-    rendered.replace_range(start..end + BLOCK_END.len(), "");
-    // The block was written with a blank line before it, which would otherwise
-    // accumulate every time the integration is installed and removed.
-    let trimmed = rendered.trim_end();
-    write_atomic(&path, &format!("{trimmed}\n"), 0o644)
+    update_atomic(&path, "", 0o644, |source| {
+        let (Some(start), Some(end)) = (source.find(BLOCK_START), source.find(BLOCK_END)) else {
+            return Ok(source.to_string());
+        };
+        if start > end {
+            return Err(format!(
+                "{} contains a malformed presence-unlock block; remove it by hand",
+                path.display()
+            ));
+        }
+        let mut rendered = source.to_string();
+        rendered.replace_range(start..end + BLOCK_END.len(), "");
+        // The block was written with a blank line before it, which would otherwise
+        // accumulate every time the integration is installed and removed.
+        Ok(format!("{}\n", rendered.trim_end()))
+    })
 }
 
 /// Applies the binding change, and refuses to call it applied if Hyprland

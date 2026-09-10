@@ -26,6 +26,91 @@ impl Default for Policy {
     }
 }
 
+/// One policy field the config asked for and did not get.
+///
+/// Surfaced so `doctor` can say a setting was rejected. A silently clamped
+/// `freshness_ms` would look like a working config while authorising an
+/// hour-old sighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyClamp {
+    pub field: &'static str,
+    pub requested: i64,
+    pub applied: i64,
+}
+
+/// Bounds on what a device policy may ask for.
+///
+/// The design rests on evidence being recent and repeated. A config that widens
+/// either far enough defeats it without looking wrong, so the outer edge is not
+/// the user's to choose.
+impl Policy {
+    pub const MIN_THRESHOLD_DBM: i16 = -110;
+    pub const MAX_THRESHOLD_DBM: i16 = -20;
+    pub const MAX_MINIMUM_SAMPLES: u8 = 10;
+    pub const MIN_SAMPLE_WINDOW_MS: u64 = 500;
+    pub const MAX_SAMPLE_WINDOW_MS: u64 = 30_000;
+    pub const MIN_FRESHNESS_MS: u64 = 500;
+    pub const MAX_FRESHNESS_MS: u64 = 10_000;
+
+    /// This policy brought inside its bounds, with whatever had to give.
+    #[must_use]
+    pub fn clamped(self) -> (Self, Vec<PolicyClamp>) {
+        let mut clamps = Vec::new();
+        let mut note = |field, requested: i64, applied: i64| {
+            if requested != applied {
+                clamps.push(PolicyClamp {
+                    field,
+                    requested,
+                    applied,
+                });
+            }
+        };
+        let threshold_dbm = self
+            .threshold_dbm
+            .clamp(Self::MIN_THRESHOLD_DBM, Self::MAX_THRESHOLD_DBM);
+        note(
+            "threshold_dbm",
+            self.threshold_dbm.into(),
+            threshold_dbm.into(),
+        );
+        let minimum_samples = self.minimum_samples.clamp(1, Self::MAX_MINIMUM_SAMPLES);
+        note(
+            "minimum_samples",
+            self.minimum_samples.into(),
+            minimum_samples.into(),
+        );
+        let sample_window_ms = self
+            .sample_window_ms
+            .clamp(Self::MIN_SAMPLE_WINDOW_MS, Self::MAX_SAMPLE_WINDOW_MS);
+        note(
+            "sample_window_ms",
+            saturating_i64(self.sample_window_ms),
+            saturating_i64(sample_window_ms),
+        );
+        let freshness_ms = self
+            .freshness_ms
+            .clamp(Self::MIN_FRESHNESS_MS, Self::MAX_FRESHNESS_MS);
+        note(
+            "freshness_ms",
+            saturating_i64(self.freshness_ms),
+            saturating_i64(freshness_ms),
+        );
+        (
+            Self {
+                threshold_dbm,
+                minimum_samples,
+                sample_window_ms,
+                freshness_ms,
+            },
+            clamps,
+        )
+    }
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -126,6 +211,13 @@ impl Eligibility {
         self.last_qualifying_ms = Some(now_ms);
     }
 
+    /// Every staleness rule is enforced here, at the moment of decision.
+    ///
+    /// `observe` also drops samples outside the window, but only to bound the
+    /// vector: a device that stops advertising stops calling `observe`, so a
+    /// count taken there would keep expired evidence alive for as long as
+    /// `freshness_ms` tolerates the last sighting. Deciding on a filtered view
+    /// makes `sample_window_ms` mean what the config says it means.
     #[must_use]
     pub fn check(&self, now_ms: u64, policy: Policy) -> Decision {
         let Some(last) = self.last_qualifying_ms else {
@@ -140,7 +232,12 @@ impl Eligibility {
         if now_ms.saturating_sub(last) > policy.freshness_ms {
             return Decision::Deny(wire::DENY_STALE);
         }
-        if self.qualifying_samples.len() < usize::from(policy.minimum_samples) {
+        let within_window = self
+            .qualifying_samples
+            .iter()
+            .filter(|sample| now_ms.saturating_sub(**sample) <= policy.sample_window_ms)
+            .count();
+        if within_window < usize::from(policy.minimum_samples) {
             return Decision::Deny(wire::DENY_INSUFFICIENT_SAMPLES);
         }
         Decision::Allow
@@ -346,6 +443,45 @@ mod tests {
             eligibility.check(3_000, policy),
             Decision::Deny(wire::DENY_STALE)
         );
+    }
+
+    /// A device that stops advertising stops calling `observe`, so nothing
+    /// prunes its samples. Counting them anyway silently widened the rule to
+    /// `sample_window_ms + freshness_ms`.
+    #[test]
+    fn samples_expire_on_the_window_even_with_no_further_advertisements() {
+        let policy = Policy {
+            sample_window_ms: 1_000,
+            freshness_ms: 2_500,
+            ..Policy::default()
+        };
+        let mut eligibility = Eligibility::default();
+        qualify(&mut eligibility, 0, -70, policy);
+        qualify(&mut eligibility, 100, -70, policy);
+        assert_eq!(eligibility.check(200, policy), Decision::Allow);
+        assert_eq!(
+            eligibility.check(1_500, policy),
+            Decision::Deny(wire::DENY_INSUFFICIENT_SAMPLES)
+        );
+    }
+
+    #[test]
+    fn a_policy_cannot_ask_for_an_hour_old_sighting() {
+        let (policy, clamps) = Policy {
+            freshness_ms: 3_600_000,
+            ..Policy::default()
+        }
+        .clamped();
+        assert_eq!(policy.freshness_ms, Policy::MAX_FRESHNESS_MS);
+        assert_eq!(
+            clamps,
+            vec![PolicyClamp {
+                field: "freshness_ms",
+                requested: 3_600_000,
+                applied: i64::try_from(Policy::MAX_FRESHNESS_MS).unwrap(),
+            }]
+        );
+        assert!(Policy::default().clamped().1.is_empty());
     }
 
     #[test]

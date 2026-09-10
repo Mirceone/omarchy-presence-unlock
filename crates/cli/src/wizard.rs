@@ -21,8 +21,13 @@
 //! the "Other Bluetooth device" route only locates a device and remembers its
 //! address.
 
+mod cancellable;
+mod daemon;
+
 use crate::ui::{Frame, Mark, Menu, Screen};
 use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
+use cancellable::{LiveStatusReader, run_cancellable};
+use daemon::{DaemonPause, UNLOCKD, restart_unlockd, systemctl, unlockd_is_active};
 use enrollment::{Cleanup, Phase, Progress};
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile, presence::MultiDeviceAuth, profile, wire,
@@ -31,14 +36,11 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc,
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
-
-const UNLOCKD: &str = "presenced";
 
 /// `DECSET`/`DECRST` 1049 — switch to and from the terminal's alternate
 /// screen buffer. Supported by every terminal this app can plausibly run
@@ -92,153 +94,6 @@ fn restore_terminal() {
         Ok(true) => println!("Restarted {UNLOCKD}."),
         Ok(false) => {}
         Err(error) => eprintln!("warning: {error}"),
-    }
-}
-
-/// Runs a long operation with Esc wired to stop it and Ctrl+C wired to leave
-/// the app, repainting the screen between polls.
-///
-/// The cancel flag is created here and handed to `work`, so it lives exactly
-/// as long as the operation it belongs to; nothing outside this call can see
-/// or set it. Ctrl+C reaches it the same way Esc does — through this poll
-/// loop — rather than by the signal handler reaching into the operation, so
-/// there is one path from "user asked" to "operation stops".
-///
-/// The work runs on a worker thread so this one can poll and paint. Polling
-/// stops the moment the worker finishes, so no keystroke meant for the next
-/// screen is swallowed.
-///
-/// Returns the operation's result and whether it was stopped early.
-fn run_cancellable<T: Send + 'static>(
-    work: impl FnOnce(&AtomicBool) -> T + Send + 'static,
-    mut repaint: impl FnMut(),
-) -> (T, bool) {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let worker_cancel = Arc::clone(&cancel);
-
-    let (done, result) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = done.send(work(&worker_cancel));
-    });
-
-    let mut outcome = None;
-    while outcome.is_none() {
-        repaint();
-        match crate::keys::wait_for_press(Duration::from_millis(100)) {
-            crate::keys::Press::Cancel => cancel.store(true, Ordering::Relaxed),
-            // Leaving still unwinds the operation first: it owns adapter
-            // state that only its own cleanup puts back.
-            crate::keys::Press::Quit => interrupt::request_quit(),
-            crate::keys::Press::Idle => {}
-        }
-        // Covers a SIGINT that landed between polls, when the terminal was
-        // not raw and Ctrl+C was a signal rather than a byte.
-        if interrupt::quit_requested() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        outcome = match result.try_recv() {
-            Ok(value) => Some(value),
-            Err(mpsc::TryRecvError::Empty) => None,
-            // The sender is dropped without a value only when the worker
-            // panicked. Waiting on a channel nothing will ever fill would
-            // hang the menu, so the panic surfaces here instead.
-            Err(mpsc::TryRecvError::Disconnected) => {
-                panic!("cancellable operation panicked")
-            }
-        };
-    }
-
-    // The loop exits only once `outcome` holds the worker's result.
-    (
-        outcome.expect("worker result"),
-        cancel.load(Ordering::Relaxed),
-    )
-}
-
-fn systemctl(args: &[&str]) -> Result<(), String> {
-    let status = Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| error.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "systemctl --user {} exited with {status}",
-            args.join(" ")
-        ))
-    }
-}
-
-/// `systemctl stop` succeeds on an already-inactive unit, so its exit status
-/// cannot say whether there was a daemon to put back afterwards.
-fn unlockd_is_active() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", UNLOCKD])
-        .stdout(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-/// Set while the menu holds the daemon stopped so an enrollment or a scan can
-/// have the adapter to itself.
-///
-/// Putting it back cannot be a plain statement at the end of the operation:
-/// a `?`, a worker panic, or the SIGINT handler's `exit` all skip past that
-/// point and would strand the user's unlock daemon until they noticed and
-/// restarted it by hand. [`DaemonPause`]'s `Drop` covers the unwinding
-/// exits and [`restore_terminal`] covers the `exit`, which no `Drop` runs
-/// for; this flag is what lets both share one restart.
-static DAEMON_STOPPED: AtomicBool = AtomicBool::new(false);
-
-/// Stops the daemon for as long as this is alive, if there was one running.
-///
-/// Silent, because the screens say what is happening. Call [`DaemonPause::resume`]
-/// to learn whether the restart worked; `Drop` is the safety net for the paths
-/// that never get that far.
-struct DaemonPause;
-
-impl DaemonPause {
-    fn stop() -> Self {
-        if unlockd_is_active() {
-            DAEMON_STOPPED.store(true, Ordering::Relaxed);
-            let _ = systemctl(&["stop", UNLOCKD]);
-        }
-        Self
-    }
-
-    /// Ends the pause here rather than at the end of the caller's scope, and
-    /// reports whether the daemon came up — which the screen that follows has
-    /// to be able to state honestly.
-    fn resume(self) -> Result<(), String> {
-        let restarted = restart_unlockd().map(|_| ());
-        // Explicit: the guard is spent, and the `Drop` it triggers finds the
-        // flag already cleared rather than issuing a second restart.
-        drop(self);
-        restarted
-    }
-}
-
-impl Drop for DaemonPause {
-    fn drop(&mut self) {
-        let _ = restart_unlockd();
-    }
-}
-
-/// Puts the daemon back if this menu stopped it, reporting whether there was
-/// anything to put back. Idempotent by the `swap`: whichever of the `Drop`
-/// and the SIGINT path runs first is the only one that acts, so an interrupt
-/// during an already-running restart cannot issue a second one.
-fn restart_unlockd() -> Result<bool, String> {
-    if DAEMON_STOPPED.swap(false, Ordering::Relaxed) {
-        systemctl(&["start", UNLOCKD])
-            .map(|()| true)
-            .map_err(|error| format!("{UNLOCKD} did not restart: {error}"))
-    } else {
-        Ok(false)
     }
 }
 
@@ -852,9 +707,8 @@ fn run_pairing(
     if result.is_ok() && daemon.is_ok() && !unlockd_is_active() {
         daemon = reload_daemon();
     }
-    // The worker is finished, so nothing else holds the lock; a poisoned lock
-    // means the worker panicked, which `run_cancellable` has already turned
-    // into a panic here.
+    // The worker is finished, so nothing else holds the lock; a panic poisons
+    // it, but its error has already been returned through `run_cancellable`.
     let state = Arc::try_unwrap(state)
         .unwrap_or_else(|_| unreachable!("the worker thread has ended"))
         .into_inner()
@@ -999,7 +853,6 @@ fn run_scan(screen: &Screen) -> (Result<Vec<pairing::Candidate>, String>, bool) 
         || {
             let mut frame = screen.frame();
             frame.title(FINDER_TITLE, Some(&FinderFlow::Scan.step()));
-            frame.blank();
             frame.line("Keep the device awake and close to the computer.");
             frame.blank();
             frame.mark(
@@ -1739,17 +1592,10 @@ fn live_status_error_frame(screen: &Screen, error: &str) -> Frame {
 }
 
 /// Refreshes the daemon's per-device and aggregate decision once a second
-/// until any key is pressed. The read runs on its own thread so the refresh
-/// loop can poll it with a timeout instead of blocking on stdin.
+/// until any key is pressed. The reader polls stdin, so every return joins it
+/// before this screen releases terminal ownership.
 fn live_status(screen: &Screen) -> Action {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        if let Err(error) = console::Term::stdout().read_key() {
-            interrupt::exit_if_interrupted(&error);
-        }
-        let _ = tx.send(());
-    });
-
+    let reader = LiveStatusReader::start();
     loop {
         let rule = LiveStatusRule::from_config();
         let frame = match client::request_lines(wire::REQ_STATUS, Duration::from_millis(200)) {
@@ -1757,8 +1603,12 @@ fn live_status(screen: &Screen) -> Action {
             Err(error) => live_status_error_frame(screen, &error),
         };
         screen.draw(&frame)?;
-        if rx.recv_timeout(Duration::from_secs(1)).is_ok() {
-            return Ok(false);
+        for _ in 0..10 {
+            if reader.was_pressed() {
+                drop(reader);
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }

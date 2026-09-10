@@ -34,6 +34,18 @@ impl Service {
 /// Returns socket binding, permissions, or accept errors.
 pub async fn serve(socket: PathBuf, service: Arc<Service>) -> io::Result<()> {
     if socket.exists() {
+        // Unlinking a socket another daemon is still serving does not stop it:
+        // it keeps its inode and its clients, while this process answers a
+        // different fleet from the same path. Refuse instead of forking policy.
+        if UnixStream::connect(&socket).await.is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "another presence daemon is already serving {}",
+                    socket.display()
+                ),
+            ));
+        }
         fs::remove_file(&socket)?;
     }
     let listener = UnixListener::bind(&socket)?;
@@ -164,5 +176,20 @@ mod tests {
         assert_eq!(lines[0], "DEVICE fob presence ALLOW rssi=-50");
         assert_eq!(lines[1], "ALLOW");
         assert_eq!(lines[2], "END");
+    }
+
+    #[tokio::test]
+    async fn a_second_daemon_refuses_to_take_over_a_live_socket() {
+        let dir = std::env::temp_dir().join(format!("opu-control-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("control.sock");
+        let first = tokio::spawn(serve(socket.clone(), Service::new(fleet())));
+        while UnixStream::connect(&socket).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+        let second = serve(socket.clone(), Service::new(fleet())).await;
+        assert_eq!(second.unwrap_err().kind(), io::ErrorKind::AddrInUse);
+        first.abort();
+        fs::remove_dir_all(dir).unwrap();
     }
 }
