@@ -1,6 +1,5 @@
-# This service is exclusively invoked by the local Omarchy Quattro lock plugin,
-# which runs unprivileged as the account it is unlocking. The module authorises
-# the effective uid, so any other stack must pin the expected account with
-# `uid=<n>`; it never authorises root.
+# Invoked only by the local Omarchy Quattro lock plugin, which runs
+# unprivileged as the account it is unlocking. The module resolves that account
+# itself and refuses anything else, so this policy carries no options.
 auth    required    pam_omarchy_presence_unlock.so
 account include     system-local-login

@@ -1,6 +1,7 @@
 //! Preflight checks. Every failure names the command that fixes it.
 
 use crate::client;
+use bluer::Session;
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile,
     paths::{config_path, current_socket_path},
@@ -20,6 +21,7 @@ const STOCK_PLUGIN_ID: &str = "omarchy.lock";
 const PRESENCE_MARKER: &str = "// omarchy-presence-unlock:presence";
 const BINDING_MARKER: &str = "-- omarchy-presence-unlock:start";
 const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
+const ADAPTER_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct LockIntegration {
     plugin_id: String,
@@ -99,26 +101,8 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
         ),
     );
 
-    for device in &config.devices {
-        if let Some(clamp) = device.policy_clamps().first() {
-            return Err(format!(
-                "device {}: {} = {} is outside the supported range and was reduced to {}; edit {}",
-                device.id,
-                clamp.field,
-                clamp.requested,
-                clamp.applied,
-                path.display()
-            ));
-        }
-    }
-    adapter_is_usable(config.adapter.as_deref())?;
-    pass(
-        checks,
-        format!(
-            "Bluetooth adapter {} powered",
-            config.adapter.as_deref().unwrap_or("hci0")
-        ),
-    );
+    let adapter_name = adapter_is_usable(config.adapter.as_deref())?;
+    pass(checks, format!("Bluetooth adapter {adapter_name} powered"));
 
     let integration = lock_integration();
     validate_lock(integration.as_ref())?;
@@ -305,33 +289,47 @@ fn presence_responds() -> bool {
         .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"ok")
 }
 
-/// The daemon and the enrollment flows both fail on an unpowered adapter, and
-/// both fail late, inside a scan that simply never sees anything. Asked over
-/// D-Bus rather than through `bluetoothctl`, which `BlueZ` splits into a
-/// separate package this one does not depend on.
-fn adapter_is_usable(adapter: Option<&str>) -> Result<(), String> {
-    let adapter = adapter.unwrap_or("hci0");
-    let output = Command::new("busctl")
-        .args([
-            "get-property",
-            "org.bluez",
-            &format!("/org/bluez/{adapter}"),
-            "org.bluez.Adapter1",
-            "Powered",
-        ])
-        .output()
-        .map_err(|error| format!("busctl is required to query BlueZ: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "BlueZ does not expose adapter {adapter}; run `sudo systemctl start bluetooth` or set `adapter` in the config"
-        ));
-    }
-    if String::from_utf8_lossy(&output.stdout).trim() != "b true" {
-        return Err(format!(
-            "Bluetooth adapter {adapter} is not powered; run `bluetoothctl power on`"
-        ));
-    }
-    Ok(())
+/// The daemon and pairing flows use the configured adapter or `BlueZ`'s default.
+/// Run the same selection in a separate runtime because `doctor` can be called
+/// from an existing Tokio runtime. The timeout covers the whole `BlueZ` query.
+fn adapter_is_usable(adapter_name: Option<&str>) -> Result<String, String> {
+    let adapter_name = adapter_name.map(str::to_owned);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("cannot create BlueZ query runtime: {error}"))?;
+        runtime.block_on(async move {
+            tokio::time::timeout(ADAPTER_QUERY_TIMEOUT, async {
+                let session = Session::new().await.map_err(|error| error.to_string())?;
+                let adapter = match adapter_name {
+                    Some(name) => session.adapter(&name).map_err(|error| error.to_string())?,
+                    None => session
+                        .default_adapter()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                };
+                let name = adapter.name().to_owned();
+                if !adapter
+                    .is_powered()
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("Bluetooth adapter {name} is not powered"));
+                }
+                Ok(name)
+            })
+            .await
+            .map_err(|_| {
+                format!(
+                    "BlueZ adapter query timed out after {} seconds",
+                    ADAPTER_QUERY_TIMEOUT.as_secs()
+                )
+            })?
+        })
+    })
+    .join()
+    .map_err(|_| "BlueZ adapter query thread panicked".to_string())?
 }
 
 fn user_service_state() -> String {

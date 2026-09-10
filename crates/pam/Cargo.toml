@@ -7,11 +7,17 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = "warn"
 
 [dependencies]
 nix = { workspace = true, features = ["user"] }
 omarchy-presence-unlock-protocol = { path = "../protocol", default-features = false }
 pam.workspace = true
 socket2.workspace = true
+
+[dev-dependencies]
+pam = { workspace = true, features = ["client"] }

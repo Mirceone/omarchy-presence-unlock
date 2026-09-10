@@ -26,89 +26,18 @@ impl Default for Policy {
     }
 }
 
-/// One policy field the config asked for and did not get.
+/// Bounds on a policy's evidence lifetime and BLE signal threshold.
 ///
-/// Surfaced so `doctor` can say a setting was rejected. A silently clamped
-/// `freshness_ms` would look like a working config while authorising an
-/// hour-old sighting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyClamp {
-    pub field: &'static str,
-    pub requested: i64,
-    pub applied: i64,
-}
-
-/// Bounds on what a device policy may ask for.
-///
-/// The design rests on evidence being recent and repeated. A config that widens
-/// either far enough defeats it without looking wrong, so the outer edge is not
-/// the user's to choose.
+/// The maximum evidence lifetimes are security boundaries: older
+/// advertisements must not authorise an unlock. The RSSI limits are the
+/// representable BLE measurement range.
 impl Policy {
-    pub const MIN_THRESHOLD_DBM: i16 = -110;
-    pub const MAX_THRESHOLD_DBM: i16 = -20;
-    pub const MAX_MINIMUM_SAMPLES: u8 = 10;
-    pub const MIN_SAMPLE_WINDOW_MS: u64 = 500;
+    pub const MIN_THRESHOLD_DBM: i16 = -127;
+    pub const MAX_THRESHOLD_DBM: i16 = 20;
     pub const MAX_SAMPLE_WINDOW_MS: u64 = 30_000;
-    pub const MIN_FRESHNESS_MS: u64 = 500;
     pub const MAX_FRESHNESS_MS: u64 = 10_000;
-
-    /// This policy brought inside its bounds, with whatever had to give.
-    #[must_use]
-    pub fn clamped(self) -> (Self, Vec<PolicyClamp>) {
-        let mut clamps = Vec::new();
-        let mut note = |field, requested: i64, applied: i64| {
-            if requested != applied {
-                clamps.push(PolicyClamp {
-                    field,
-                    requested,
-                    applied,
-                });
-            }
-        };
-        let threshold_dbm = self
-            .threshold_dbm
-            .clamp(Self::MIN_THRESHOLD_DBM, Self::MAX_THRESHOLD_DBM);
-        note(
-            "threshold_dbm",
-            self.threshold_dbm.into(),
-            threshold_dbm.into(),
-        );
-        let minimum_samples = self.minimum_samples.clamp(1, Self::MAX_MINIMUM_SAMPLES);
-        note(
-            "minimum_samples",
-            self.minimum_samples.into(),
-            minimum_samples.into(),
-        );
-        let sample_window_ms = self
-            .sample_window_ms
-            .clamp(Self::MIN_SAMPLE_WINDOW_MS, Self::MAX_SAMPLE_WINDOW_MS);
-        note(
-            "sample_window_ms",
-            saturating_i64(self.sample_window_ms),
-            saturating_i64(sample_window_ms),
-        );
-        let freshness_ms = self
-            .freshness_ms
-            .clamp(Self::MIN_FRESHNESS_MS, Self::MAX_FRESHNESS_MS);
-        note(
-            "freshness_ms",
-            saturating_i64(self.freshness_ms),
-            saturating_i64(freshness_ms),
-        );
-        (
-            Self {
-                threshold_dbm,
-                minimum_samples,
-                sample_window_ms,
-                freshness_ms,
-            },
-            clamps,
-        )
-    }
-}
-
-fn saturating_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+    /// Minimum gap between two counted advertisements.
+    pub const MIN_SAMPLE_SPACING_MS: u64 = 50;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,11 +68,6 @@ impl Decision {
         }
     }
 }
-
-/// Minimum gap between two counted advertisements, in milliseconds.
-///
-/// Guards against one advertisement being counted twice; see [`Eligibility::observe`].
-const MIN_SAMPLE_SPACING_MS: u64 = 50;
 
 #[derive(Debug, Default)]
 pub struct Eligibility {
@@ -203,7 +127,7 @@ impl Eligibility {
         // this collapses the duplicate without discarding a genuine advertisement.
         if self
             .last_qualifying_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) < MIN_SAMPLE_SPACING_MS)
+            .is_some_and(|last| now_ms.saturating_sub(last) < Policy::MIN_SAMPLE_SPACING_MS)
         {
             return;
         }
@@ -463,25 +387,6 @@ mod tests {
             eligibility.check(1_500, policy),
             Decision::Deny(wire::DENY_INSUFFICIENT_SAMPLES)
         );
-    }
-
-    #[test]
-    fn a_policy_cannot_ask_for_an_hour_old_sighting() {
-        let (policy, clamps) = Policy {
-            freshness_ms: 3_600_000,
-            ..Policy::default()
-        }
-        .clamped();
-        assert_eq!(policy.freshness_ms, Policy::MAX_FRESHNESS_MS);
-        assert_eq!(
-            clamps,
-            vec![PolicyClamp {
-                field: "freshness_ms",
-                requested: 3_600_000,
-                applied: i64::try_from(Policy::MAX_FRESHNESS_MS).unwrap(),
-            }]
-        );
-        assert!(Policy::default().clamped().1.is_empty());
     }
 
     #[test]

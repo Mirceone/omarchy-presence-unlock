@@ -1,9 +1,19 @@
 //! The control socket: the only way anything outside the daemon reaches policy.
 
 use crate::clock::boottime_ms;
-use nix::unistd::Uid;
+use nix::{
+    errno::Errno,
+    fcntl::{Flock, FlockArg},
+    unistd::Uid,
+};
 use omarchy_presence_unlock_protocol::{Decision, Fleet, wire};
-use std::{fs, io, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs, io,
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -31,23 +41,33 @@ impl Service {
 
 /// # Errors
 ///
-/// Returns socket binding, permissions, or accept errors.
+/// Returns `AddrInUse` when another daemon holds the sibling lock or answers on
+/// the endpoint, and socket binding, permissions, or accept errors otherwise.
 pub async fn serve(socket: PathBuf, service: Arc<Service>) -> io::Result<()> {
-    if socket.exists() {
-        // Unlinking a socket another daemon is still serving does not stop it:
-        // it keeps its inode and its clients, while this process answers a
-        // different fleet from the same path. Refuse instead of forking policy.
-        if UnixStream::connect(&socket).await.is_ok() {
-            return Err(io::Error::new(
+    let mut lock_path = socket.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, error)| {
+        if error == Errno::EWOULDBLOCK {
+            io::Error::new(
                 io::ErrorKind::AddrInUse,
                 format!(
-                    "another presence daemon is already serving {}",
+                    "another presence daemon is starting or serving {}",
                     socket.display()
                 ),
-            ));
+            )
+        } else {
+            io::Error::other(format!("cannot lock {}: {error}", lock_path.display()))
         }
-        fs::remove_file(&socket)?;
-    }
+    })?;
+
+    remove_stale_socket(&socket).await?;
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let clients = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
@@ -67,6 +87,50 @@ pub async fn serve(socket: PathBuf, service: Arc<Service>) -> io::Result<()> {
             }
             drop(permit);
         });
+    }
+}
+
+async fn remove_stale_socket(socket: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "refusing to replace non-socket endpoint {}",
+                socket.display()
+            ),
+        ));
+    }
+
+    match tokio::time::timeout(Duration::from_millis(100), UnixStream::connect(socket)).await {
+        Ok(Ok(_)) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "another presence daemon is already serving {}",
+                socket.display()
+            ),
+        )),
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => {
+            fs::remove_file(socket)
+        }
+        Ok(Err(error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "cannot determine whether {} is stale: {error}",
+                socket.display()
+            ),
+        )),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "timed out probing {}; leaving it in place",
+                socket.display()
+            ),
+        )),
     }
 }
 
@@ -179,17 +243,98 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_daemon_refuses_to_take_over_a_live_socket() {
-        let dir = std::env::temp_dir().join(format!("opu-control-{}", std::process::id()));
+    async fn stale_socket_cleanup_refuses_regular_files_and_symlinks() {
+        let dir = std::env::temp_dir().join(format!(
+            "opu-control-nonsocket-{}-{}",
+            std::process::id(),
+            boottime_ms()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("control.sock");
-        let first = tokio::spawn(serve(socket.clone(), Service::new(fleet())));
-        while UnixStream::connect(&socket).await.is_err() {
-            tokio::task::yield_now().await;
-        }
-        let second = serve(socket.clone(), Service::new(fleet())).await;
-        assert_eq!(second.unwrap_err().kind(), io::ErrorKind::AddrInUse);
-        first.abort();
+        fs::write(&socket, "do not remove").unwrap();
+        assert_eq!(
+            remove_stale_socket(&socket).await.unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        assert_eq!(fs::read_to_string(&socket).unwrap(), "do not remove");
+
+        let target = dir.join("target");
+        fs::write(&target, "also do not remove").unwrap();
+        fs::remove_file(&socket).unwrap();
+        std::os::unix::fs::symlink(&target, &socket).unwrap();
+        assert_eq!(
+            remove_stale_socket(&socket).await.unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        assert!(
+            fs::symlink_metadata(&socket)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_socket_startup_keeps_the_lock_for_the_server_lifetime() {
+        let dir = std::env::temp_dir().join(format!(
+            "opu-control-{}-{}",
+            std::process::id(),
+            boottime_ms()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("control.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        drop(stale);
+
+        let mut first = tokio::spawn(serve(socket.clone(), Service::new(fleet())));
+        let mut second = tokio::spawn(serve(socket.clone(), Service::new(fleet())));
+        let (first_lost, result) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut first => (true, result),
+                result = &mut second => (false, result),
+            }
+        })
+        .await
+        .expect("one concurrent starter must promptly lose the lock");
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            io::ErrorKind::AddrInUse,
+            "the loser must not unlink the winner's endpoint"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if UnixStream::connect(&socket).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the lock holder must serve the cleaned stale endpoint");
+
+        fs::remove_file(&socket).unwrap();
+        let blocked = serve(socket.clone(), Service::new(fleet())).await;
+        assert_eq!(blocked.unwrap_err().kind(), io::ErrorKind::AddrInUse);
+
+        let winner = if first_lost { &mut second } else { &mut first };
+        winner.abort();
+        let _ = winner.await;
+
+        let replacement = tokio::spawn(serve(socket.clone(), Service::new(fleet())));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if UnixStream::connect(&socket).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the server must release its sibling lock");
+        replacement.abort();
+        let _ = replacement.await;
         fs::remove_dir_all(dir).unwrap();
     }
 }

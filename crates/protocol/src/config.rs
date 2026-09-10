@@ -7,7 +7,7 @@ use crate::{
     ble::parse_address,
     identity::Identity,
     paths,
-    presence::{DeviceSpec, MultiDeviceAuth, Policy, PolicyClamp},
+    presence::{DeviceSpec, MultiDeviceAuth, Policy},
     profile::Profile,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -119,6 +119,13 @@ pub enum ConfigError {
         "at-least:{required} needs {required} enrolled devices but {configured} are configured; run `omarchy-presence-unlock multi-device-auth any`"
     )]
     MultiDeviceAuthExceedsDeviceCount { required: u8, configured: usize },
+    #[error("device {device}: {field} = {value} is outside allowed range {allowed}")]
+    Policy {
+        device: String,
+        field: &'static str,
+        value: String,
+        allowed: String,
+    },
 }
 
 impl ConfigFile {
@@ -253,14 +260,64 @@ impl DeviceEntry {
         }
     }
 
-    fn policy(&self) -> Policy {
-        self.requested_policy().clamped().0
+    fn policy(&self) -> Result<Policy, ConfigError> {
+        let policy = self.requested_policy();
+        self.validate_policy(policy)?;
+        Ok(policy)
     }
 
-    /// Policy fields this device asked for and did not get.
-    #[must_use]
-    pub fn policy_clamps(&self) -> Vec<PolicyClamp> {
-        self.requested_policy().clamped().1
+    fn validate_policy(&self, policy: Policy) -> Result<(), ConfigError> {
+        let invalid = |field, value, allowed| {
+            Err(ConfigError::Policy {
+                device: self.id.clone(),
+                field,
+                value,
+                allowed,
+            })
+        };
+        if !(Policy::MIN_THRESHOLD_DBM..=Policy::MAX_THRESHOLD_DBM).contains(&policy.threshold_dbm)
+        {
+            return invalid(
+                "threshold_dbm",
+                policy.threshold_dbm.to_string(),
+                format!(
+                    "{}..={}",
+                    Policy::MIN_THRESHOLD_DBM,
+                    Policy::MAX_THRESHOLD_DBM
+                ),
+            );
+        }
+        if policy.minimum_samples == 0 {
+            return invalid("minimum_samples", "0".into(), "1..=255".into());
+        }
+        if !(1..=Policy::MAX_SAMPLE_WINDOW_MS).contains(&policy.sample_window_ms) {
+            return invalid(
+                "sample_window_ms",
+                policy.sample_window_ms.to_string(),
+                format!("1..={}", Policy::MAX_SAMPLE_WINDOW_MS),
+            );
+        }
+        if !(1..=Policy::MAX_FRESHNESS_MS).contains(&policy.freshness_ms) {
+            return invalid(
+                "freshness_ms",
+                policy.freshness_ms.to_string(),
+                format!("1..={}", Policy::MAX_FRESHNESS_MS),
+            );
+        }
+
+        let maximum_samples = policy.sample_window_ms / Policy::MIN_SAMPLE_SPACING_MS + 1;
+        if u64::from(policy.minimum_samples) > maximum_samples {
+            return invalid(
+                "minimum_samples",
+                policy.minimum_samples.to_string(),
+                format!(
+                    "1..={maximum_samples} for sample_window_ms = {} with {}ms spacing",
+                    policy.sample_window_ms,
+                    Policy::MIN_SAMPLE_SPACING_MS
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -271,7 +328,7 @@ impl DeviceEntry {
             id: self.id.clone(),
             identity: self.identity()?,
             profile: self.profile()?,
-            policy: self.policy(),
+            policy: self.policy()?,
         })
     }
 }
@@ -315,6 +372,57 @@ profile = "presence"
 address = "AA:BB:CC:DD:EE:FF"
 "#
         )
+    }
+
+    fn policy_config(policy: &str) -> String {
+        format!(
+            "schema_version = 4\n[[device]]\nid = \"watch\"\nprofile = \"presence\"\naddress = \"AA:BB:CC:DD:EE:FF\"\n{policy}\n"
+        )
+    }
+
+    #[test]
+    fn policy_evidence_lifetime_is_rejected_instead_of_reduced() {
+        let error = ConfigFile::parse(&policy_config("freshness_ms = 10001"))
+            .unwrap()
+            .resolve()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "device watch: freshness_ms = 10001 is outside allowed range 1..=10000"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_sample_counts_that_cannot_fit_the_window() {
+        let error = ConfigFile::parse(&policy_config(
+            "minimum_samples = 20\nsample_window_ms = 100",
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "device watch: minimum_samples = 20 is outside allowed range 1..=3 for sample_window_ms = 100 with 50ms spacing"
+        );
+    }
+
+    #[test]
+    fn stricter_feasible_policy_values_are_preserved() {
+        let settings = ConfigFile::parse(&policy_config(
+            "minimum_samples = 20\nsample_window_ms = 1_000",
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(settings.devices[0].policy.minimum_samples, 20);
+        assert_eq!(settings.devices[0].policy.sample_window_ms, 1_000);
+        let settings = ConfigFile::parse(&policy_config(
+            "minimum_samples = 2\nsample_window_ms = 100",
+        ))
+        .unwrap()
+        .resolve()
+        .unwrap();
+        assert_eq!(settings.devices[0].policy.sample_window_ms, 100);
     }
 
     #[test]
