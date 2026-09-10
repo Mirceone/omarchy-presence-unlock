@@ -134,13 +134,15 @@ enum Commands {
     Doctor,
     /// Print the daemon's per-device and aggregate decision.
     Status,
-    /// Apply the lock-screen integration for this user: the Omarchy shell
-    /// plugin, the Alt binding, and the presence service. Unprivileged, and
-    /// safe to rerun after an Omarchy or package update.
+    /// Apply the lock-screen integration for this user: the presence lock
+    /// plugin, the Alt binding, the Omarchy menu entry, and the presence
+    /// service. Unprivileged, and safe to rerun after an Omarchy or package
+    /// update.
     Setup,
-    /// Remove the per-user integration: the Omarchy shell plugin, the Alt
-    /// binding, the presence service, and optionally the enrolled devices.
-    /// The program itself is a package; remove it with pacman.
+    /// Remove the per-user integration: the presence lock plugin, restoring
+    /// Omarchy's built-in lock, plus the Alt binding, the menu entry, the
+    /// presence service, and optionally the enrolled devices. The program
+    /// itself is a package; remove it with pacman.
     Uninstall {
         /// Also delete the enrolled devices and their keys.
         #[arg(long)]

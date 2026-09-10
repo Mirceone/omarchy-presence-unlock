@@ -1,10 +1,11 @@
-//! The Omarchy menu row that opens this program.
+//! The Omarchy menu rows for this integration.
 //!
-//! Omarchy puts fingerprint and the other authenticators under **Setup →
-//! Security**, and that is where a user looks for this one. The row is a
-//! single entry pointing at the interactive CLI rather than a submenu
-//! mirroring it: the wizard already knows how to enroll, list, and diagnose,
-//! and a second copy of that surface would be one more thing to keep in sync.
+//! Fingerprint is the pattern followed here: one row under **Setup →
+//! Security** that applies it, and one under **Remove → Security** that
+//! takes it away. The setup row becomes the way in afterwards too — once the
+//! integration is applied it opens the interactive CLI, which already knows
+//! how to enroll, manage devices, and diagnose. A submenu mirroring that
+//! surface would be a second copy to keep in sync.
 //!
 //! The menu extension file belongs to the user and is mostly comments in its
 //! stock form, so it is edited as text between markers rather than reparsed
@@ -17,12 +18,49 @@ use std::fs;
 pub(super) const BLOCK_START: &str = "// omarchy-presence-unlock:menu:start";
 pub(super) const BLOCK_END: &str = "// omarchy-presence-unlock:menu:end";
 
-pub(super) const ENTRY_ID: &str = "setup.security.presence";
+pub(super) const SETUP_ENTRY_ID: &str = "setup.security.presence";
+pub(super) const MANAGE_ENTRY_ID: &str = "setup.security.presence-manage";
+pub(super) const REMOVE_ENTRY_ID: &str = "remove.security.presence";
+
+const ICON: &str = "\u{f0990}";
+
+/// Whether the lock plugin is installed, as a shell condition the menu can
+/// evaluate. The rows are complementary on it, so exactly one appears under
+/// Setup: apply it, or open it.
+const APPLIED: &str = "[ -d \\\"$HOME/.config/omarchy/plugins/${USER}.lock\\\" ]";
+
+fn row(id: &str, label: &str, description: &str, when: &str, command: &str) -> String {
+    format!(
+        "  \"{id}\": {{\"icon\":\"{ICON}\",\"label\":\"{label}\",\"description\":\"{description}\",\"when\":\"{when}\",\"action\":\"omarchy-launch-floating-terminal-with-presentation {command}\"}}"
+    )
+}
 
 fn block() -> String {
-    format!(
-        "  {BLOCK_START}\n  \"{ENTRY_ID}\": {{\"icon\":\"\u{f0990}\",\"label\":\"Presence Unlock\",\"description\":\"Enroll a trusted device, manage presence unlock, and run diagnostics\",\"when\":\"command -v omarchy-presence-unlock >/dev/null\",\"action\":\"omarchy-launch-floating-terminal-with-presentation omarchy-presence-unlock\"}}\n  {BLOCK_END}\n"
-    )
+    let installed = "command -v omarchy-presence-unlock >/dev/null";
+    let rows = [
+        row(
+            SETUP_ENTRY_ID,
+            "Presence Unlock",
+            "Set up unlocking with a trusted Bluetooth device",
+            &format!("{installed} && ! {APPLIED}"),
+            "omarchy-presence-unlock setup",
+        ),
+        row(
+            MANAGE_ENTRY_ID,
+            "Presence Unlock",
+            "Enroll a trusted device, manage presence unlock, and run diagnostics",
+            &format!("{installed} && {APPLIED}"),
+            "omarchy-presence-unlock",
+        ),
+        row(
+            REMOVE_ENTRY_ID,
+            "Presence Unlock",
+            "Remove presence unlock and restore Omarchy's own lock screen",
+            &format!("{installed} && {APPLIED}"),
+            "omarchy-presence-unlock uninstall",
+        ),
+    ];
+    format!("  {BLOCK_START}\n{}\n  {BLOCK_END}\n", rows.join(",\n"))
 }
 
 /// The stock file Omarchy ships when the user has none: an empty object,
@@ -190,20 +228,41 @@ mod tests {
     }
 
     /// The stock file is an object of nothing but comments, so the first
-    /// entry must not inherit a comma from them.
+    /// entry must not inherit a comma from them. All three rows land, and
+    /// the two Setup rows are complementary so only one is ever offered.
     #[test]
-    fn an_entry_lands_in_a_commented_stock_file() {
+    fn the_rows_land_in_a_commented_stock_file() {
         let stock = "{\n  // Extend the menu with JSONC.\n  // \"personal\": {\"label\":\"Personal\"},\n}\n";
         let rendered = render_entry(stock).unwrap();
 
         let parsed = parse(&rendered);
+        assert_eq!(parsed.as_object().unwrap().len(), 3);
         assert!(
-            parsed[ENTRY_ID]["action"]
+            parsed[SETUP_ENTRY_ID]["action"]
                 .as_str()
                 .unwrap()
-                .contains("omarchy-presence-unlock")
+                .ends_with("omarchy-presence-unlock setup")
         );
-        assert_eq!(parsed.as_object().unwrap().len(), 1);
+        assert!(
+            parsed[MANAGE_ENTRY_ID]["action"]
+                .as_str()
+                .unwrap()
+                .ends_with("omarchy-presence-unlock")
+        );
+        assert!(
+            parsed[REMOVE_ENTRY_ID]["action"]
+                .as_str()
+                .unwrap()
+                .ends_with("omarchy-presence-unlock uninstall")
+        );
+
+        // Setting up and managing are the same row to a user: exactly one is
+        // visible, decided by whether the integration is applied.
+        let setup_when = parsed[SETUP_ENTRY_ID]["when"].as_str().unwrap();
+        let manage_when = parsed[MANAGE_ENTRY_ID]["when"].as_str().unwrap();
+        assert_eq!(setup_when.replace("&& ! ", "&& "), manage_when);
+        // Removal is only offered once there is something to remove.
+        assert_eq!(parsed[REMOVE_ENTRY_ID]["when"], manage_when);
         assert!(rendered.contains("// Extend the menu with JSONC."));
     }
 
@@ -216,7 +275,7 @@ mod tests {
 
         let parsed = parse(&rendered);
         assert_eq!(parsed["personal"]["label"], "Personal");
-        assert!(parsed[ENTRY_ID].is_object());
+        assert!(parsed[SETUP_ENTRY_ID].is_object());
     }
 
     /// Setup reruns on every update, and removal has to leave the file the
@@ -243,6 +302,6 @@ mod tests {
 
         let parsed = parse(&rendered);
         assert_eq!(parsed["note"]["label"], "a } and a , inside");
-        assert!(parsed[ENTRY_ID].is_object());
+        assert!(parsed[SETUP_ENTRY_ID].is_object());
     }
 }
