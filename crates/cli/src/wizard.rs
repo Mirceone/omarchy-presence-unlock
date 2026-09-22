@@ -22,12 +22,16 @@
 //! address.
 
 use crate::ui::{Frame, Mark, Menu, Screen};
-use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
+use crate::{
+    atomic::write_atomic, client, devices, doctor, enrollment, interrupt, pairing, setup, ui,
+};
 use enrollment::{Cleanup, Phase, Progress};
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile, presence::MultiDeviceAuth, profile, wire,
 };
 use std::{
+    fs,
+    path::PathBuf,
     process::Command,
     sync::{
         Arc, Mutex,
@@ -1839,13 +1843,226 @@ fn uninstall(screen: &Screen) -> Action {
     Ok(false)
 }
 
+const LOCK_DELAYS: [i64; 5] = [3, 5, 10, 15, 30];
+const NO_DEVICE_DELAYS: [i64; 4] = [15, 30, 45, 60];
+const UNLOCK_DELAYS: [i64; 3] = [1, 2, 3];
+const LOCK_THRESHOLDS: [i64; 9] = [-50, -55, -60, -65, -70, -75, -80, -85, -90];
+const UNLOCK_THRESHOLDS: [i64; 8] = [-80, -75, -70, -65, -60, -55, -50, -45];
+
+fn automation_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".config"))
+        })
+        .ok_or_else(|| "XDG_CONFIG_HOME or HOME is required".to_string())?;
+
+    Ok(base.join("omarchy-presence-unlock").join("automation.json"))
+}
+
+fn automation_defaults() -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        ("auto_lock".into(), false.into()),
+        ("auto_unlock".into(), false.into()),
+        ("unlock_only_after_auto_lock".into(), true.into()),
+        ("suspend_when_watch_locked".into(), true.into()),
+        ("lock_after_seconds".into(), 15.into()),
+        ("no_device_lock_after_seconds".into(), 30.into()),
+        ("unlock_after_seconds".into(), 1.into()),
+        ("cooldown_seconds".into(), 10.into()),
+        ("lock_rssi".into(), (-85).into()),
+        ("wake_rssi".into(), (-85).into()),
+        ("approach_delta_db".into(), 3.into()),
+        ("unlock_rssi".into(), (-55).into()),
+    ])
+}
+
+fn load_automation_config() -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = automation_path()?;
+
+    if !path.is_file() {
+        return Ok(automation_defaults());
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid automation configuration: {error}"))?;
+
+    let mut config = automation_defaults();
+    let existing = value
+        .as_object()
+        .ok_or_else(|| "automation configuration must be a JSON object".to_string())?;
+
+    for (key, value) in existing {
+        config.insert(key.clone(), value.clone());
+    }
+
+    Ok(config)
+}
+
+fn save_automation_config(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let path = automation_path()?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let rendered = serde_json::to_string_pretty(config).map_err(|error| error.to_string())? + "\n";
+
+    write_atomic(&path, &rendered, 0o600)
+}
+
+fn automation_bool(config: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    config
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn automation_i64(
+    config: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    default: i64,
+) -> i64 {
+    config
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(default)
+}
+
+fn toggle_automation_bool(config: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    let enabled = automation_bool(config, key);
+    config.insert(key.into(), (!enabled).into());
+}
+
+fn cycle_automation_value(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    choices: &[i64],
+    default: i64,
+) {
+    let current = automation_i64(config, key, default);
+    let next = choices
+        .iter()
+        .position(|value| *value == current)
+        .map_or(choices[0], |index| choices[(index + 1) % choices.len()]);
+
+    config.insert(key.into(), next.into());
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "On" } else { "Off" }
+}
+
+fn seconds(value: i64) -> String {
+    if value == 1 {
+        "1 second".into()
+    } else {
+        format!("{value} seconds")
+    }
+}
+
+fn proximity_automation(screen: &Screen) -> Action {
+    let mut selected = 0;
+
+    loop {
+        let mut config = load_automation_config()?;
+
+        let auto_lock = automation_bool(&config, "auto_lock");
+        let auto_unlock = automation_bool(&config, "auto_unlock");
+        let only_auto_locks = automation_bool(&config, "unlock_only_after_auto_lock");
+        let suspend_locked = automation_bool(&config, "suspend_when_watch_locked");
+
+        let lock_delay = automation_i64(&config, "lock_after_seconds", 5);
+        let no_device_delay = automation_i64(&config, "no_device_lock_after_seconds", 30);
+        let unlock_delay = automation_i64(&config, "unlock_after_seconds", 1);
+        let lock_rssi = automation_i64(&config, "lock_rssi", -60);
+        let unlock_rssi = automation_i64(&config, "unlock_rssi", -55);
+
+        let mut head = screen.frame();
+        head.title("Proximity automation", None);
+        head.blank();
+        head.line("Optional BLE-only lock, wake, and unlock behavior.");
+        head.line("The first Watch signal after an automatic lock wakes the display.");
+        head.line("Select a setting to toggle it or cycle its presets.");
+        head.blank();
+        head.warn(
+            "Automatic unlock is a convenience feature. Password and fingerprint remain available.",
+        );
+
+        let items = vec![
+            format!("Automatic lock                 {}", on_off(auto_lock)),
+            format!("Weak-signal lock delay         {}", seconds(lock_delay)),
+            format!(
+                "No-signal timeout              {}",
+                seconds(no_device_delay)
+            ),
+            format!("Lock signal threshold          {}", dbm(lock_rssi as i16)),
+            format!("Automatic unlock               {}", on_off(auto_unlock)),
+            format!("Unlock delay                   {}", seconds(unlock_delay)),
+            format!("Unlock signal threshold        {}", dbm(unlock_rssi as i16)),
+            format!("Unlock only automation locks   {}", on_off(only_auto_locks)),
+            format!("Suspend when Watch is locked   {}", on_off(suspend_locked)),
+            "Back".to_string(),
+        ];
+
+        let back = items.len() - 1;
+
+        let Some(choice) = Menu::new(head, items)
+            .footer(ui::NAV_BACK)
+            .selected(selected.min(back))
+            .run(screen)?
+        else {
+            return Ok(false);
+        };
+
+        if choice == back {
+            return Ok(false);
+        }
+
+        selected = choice;
+
+        match choice {
+            0 => toggle_automation_bool(&mut config, "auto_lock"),
+            1 => cycle_automation_value(&mut config, "lock_after_seconds", &LOCK_DELAYS, 5),
+            2 => cycle_automation_value(
+                &mut config,
+                "no_device_lock_after_seconds",
+                &NO_DEVICE_DELAYS,
+                30,
+            ),
+            3 => cycle_automation_value(&mut config, "lock_rssi", &LOCK_THRESHOLDS, -60),
+            4 => toggle_automation_bool(&mut config, "auto_unlock"),
+            5 => cycle_automation_value(&mut config, "unlock_after_seconds", &UNLOCK_DELAYS, 1),
+            6 => cycle_automation_value(&mut config, "unlock_rssi", &UNLOCK_THRESHOLDS, -55),
+            7 => toggle_automation_bool(&mut config, "unlock_only_after_auto_lock"),
+            8 => toggle_automation_bool(&mut config, "suspend_when_watch_locked"),
+            _ => unreachable!(),
+        }
+
+        let lock_rssi = automation_i64(&config, "lock_rssi", -60);
+        let unlock_rssi = automation_i64(&config, "unlock_rssi", -55);
+
+        if unlock_rssi <= lock_rssi {
+            config.insert("unlock_rssi".into(), (lock_rssi + 5).into());
+        }
+
+        save_automation_config(&config)?;
+    }
+}
+
 /// The setup command owns the lock-screen integration: it is applied by the
 /// installer and re-applied by `setup`, so offering it here only
 /// invited a user to install what is already installed.
-const MAIN_MENU: [&str; 7] = [
+const MAIN_MENU: [&str; 8] = [
     "Enroll a device",
     "Manage enrolled devices",
     "Multi-device authentication",
+    "Proximity automation",
     "Run diagnostics",
     "View live status",
     "Uninstall",
@@ -1888,8 +2105,9 @@ pub fn run() -> Result<(), String> {
             0 => enroll_menu(&screen),
             1 => manage_devices(&screen),
             2 => choose_multi_device_auth(&screen),
-            3 => diagnostics(&screen).map(|()| false),
-            4 => live_status(&screen),
+            3 => proximity_automation(&screen),
+            4 => diagnostics(&screen).map(|()| false),
+            5 => live_status(&screen),
             _ => uninstall(&screen),
         };
         // Ctrl+C during the action asked to leave, and the action has now
@@ -1907,6 +2125,56 @@ pub fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proximity_automation_defaults_to_off() {
+        let config = automation_defaults();
+
+        assert_eq!(
+            config.get("auto_lock").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            config
+                .get("auto_unlock")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            config
+                .get("suspend_when_watch_locked")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .get("unlock_only_after_auto_lock")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            config
+                .get("lock_after_seconds")
+                .and_then(serde_json::Value::as_i64),
+            Some(15)
+        );
+        assert_eq!(
+            config.get("lock_rssi").and_then(serde_json::Value::as_i64),
+            Some(-85)
+        );
+        assert_eq!(
+            config
+                .get("no_device_lock_after_seconds")
+                .and_then(serde_json::Value::as_i64),
+            Some(30)
+        );
+        assert_eq!(
+            config
+                .get("unlock_rssi")
+                .and_then(serde_json::Value::as_i64),
+            Some(-55)
+        );
+    }
 
     #[test]
     fn signal_quality_reads_the_bands_the_picker_shows() {

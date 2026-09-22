@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "presence.automation",
+  "name": "Presence Automation",
+  "version": "0.1.0",
+  "author": "bachjessen",
+  "description": "Opt-in proximity locking and unlocking using the existing Presence Unlock daemon.",
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
