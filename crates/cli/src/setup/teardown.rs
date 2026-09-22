@@ -67,8 +67,21 @@ pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
         lock::remove(),
     ));
     steps.push(step("Removed the Omarchy menu entry", menu::remove()));
+    let baseline = binding::config_errors();
     steps.push(step("Removed the Alt unlock binding", binding::remove()));
-    steps.push(step("Reloaded Hyprland", binding::reload_hyprland()));
+    // Advisory: the block is already gone from bindings.lua, so Hyprland drops
+    // it at its next reload, and there is no Hyprland to reload over SSH.
+    // Neither may hold the package hostage.
+    steps.push(
+        match baseline.and_then(|before| binding::reload_hyprland(&before)) {
+            Ok(()) => step("Reloaded Hyprland", Ok(())),
+            Err(error) => Step {
+                label: "Hyprland not reloaded; the binding stops at its next reload".into(),
+                ok: true,
+                detail: Some(error),
+            },
+        },
+    );
     steps.push(step(
         "Disabled and stopped the presence service",
         service::stop(),

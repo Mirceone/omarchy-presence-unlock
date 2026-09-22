@@ -8,7 +8,7 @@
 # pacman treats one as an upgrade of the other.
 
 pkgname=omarchy-presence-unlock
-pkgver=0.1.0.r15.g57131b7
+pkgver=0.1.0.r16.gf6a5586
 pkgrel=1
 pkgdesc='BLE device presence unlock for Omarchy (local build)'
 arch=('x86_64')
@@ -18,8 +18,9 @@ install=../omarchy-presence-unlock.install
 backup=('etc/pam.d/omarchy-lock-presence')
 # No makedepends: this builds with whatever cargo is on the invoking user's
 # PATH, which for rustup or mise is not a pacman package at all. install.sh
-# checks for the toolchain itself. The runtime depends() still apply, and
-# pacman enforces them when the package is installed.
+# checks for the toolchain itself. The runtime depends() are the release
+# package's, so both packages sharing this pkgname carry the same metadata.
+depends=('bluez' 'pam' 'omarchy' 'hyprland' 'systemd')
 makedepends=()
 # The sources are the checkout itself, reached through $startdir rather than
 # copied, so a rebuild reuses the existing target directory.
@@ -32,12 +33,19 @@ _repo() {
 
 pkgver() {
   cd "$(_repo)"
-  # Sorts above any released version, so installing a local build over the AUR
-  # package is an upgrade rather than a downgrade pacman would refuse.
+  # Sorts above the release it builds on, so installing a local build over the
+  # AUR package is an upgrade rather than a downgrade pacman would refuse.
+  # A `curl | bash` install builds a tarball with no git metadata, so the
+  # crate version is the floor every branch starts from.
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+  [[ -n $version ]] || return 1
   if description=$(git describe --long --tags 2>/dev/null); then
     printf '%s' "$description" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  elif count=$(git rev-list --count HEAD 2>/dev/null); then
+    printf '%s.r%s.g%s' "$version" "$count" "$(git rev-parse --short HEAD)"
   else
-    printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    printf '%s.r0' "$version"
   fi
 }
 

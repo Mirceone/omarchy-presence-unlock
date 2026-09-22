@@ -422,7 +422,7 @@ fn claim_target(target: &Path) -> Result<(), String> {
     if !paths::exists(target) {
         return Ok(());
     }
-    if fs::read_to_string(target.join(SERVICE_FILE)).is_ok_and(|s| s.contains(PRESENCE_MARKER)) {
+    if is_generated(target) {
         return Ok(());
     }
     Err(format!(
@@ -575,24 +575,51 @@ pub(super) fn install(plugin_id: &str, clone: &Clone) -> Result<(), String> {
 /// removed.
 pub(super) fn remove() -> Result<(), String> {
     let plugin_id = plugin_id()?;
-    if paths::exists(&paths::plugin_dir()?) {
-        super::run(Command::new("omarchy").args(["plugin", "remove", &plugin_id, "--yes"]))?;
+    let target = paths::plugin_dir()?;
+    // A `<user>.lock` without the marker is the user's own clone of the stock
+    // lock (Omarchy's `plugin clone` picks the same id). It is not ours to
+    // remove, and neither are its backups.
+    if !paths::exists(&target) || !is_generated(&target) {
+        return Ok(());
     }
+    let prefix = format!(".{plugin_id}.bak.");
+    let before = backups(&prefix)?;
+    super::run(Command::new("omarchy").args(["plugin", "remove", &plugin_id, "--yes"]))?;
 
     // `omarchy plugin remove` keeps a backup of a plugin it did not clone
-    // from git, so a user does not lose work. This one is generated from the
-    // stock lock on every setup, so keeping it would only leave presence code
-    // on a machine that asked to be rid of it.
-    let prefix = format!(".{plugin_id}.bak.");
-    let Ok(entries) = fs::read_dir(paths::plugins_dir()?) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            paths::remove(&entry.path())?;
-        }
+    // from git. This one is generated from the stock lock, so keeping it would
+    // only leave presence code behind. Only the backup this removal created
+    // is deleted; older ones may hold a user's earlier hand-made clone.
+    for created in backups(&prefix)?.difference(&before) {
+        paths::remove(&paths::plugins_dir()?.join(created))?;
     }
     Ok(())
+}
+
+/// Whether the generated presence lock is currently installed.
+///
+/// # Errors
+///
+/// Returns an error when the plugin location cannot be derived.
+pub(super) fn is_installed() -> Result<bool, String> {
+    let target = paths::plugin_dir()?;
+    Ok(paths::exists(&target) && is_generated(&target))
+}
+
+/// Whether this plugin directory holds the clone setup generated.
+fn is_generated(target: &Path) -> bool {
+    fs::read_to_string(target.join(SERVICE_FILE)).is_ok_and(|s| s.contains(PRESENCE_MARKER))
+}
+
+fn backups(prefix: &str) -> Result<std::collections::HashSet<std::ffi::OsString>, String> {
+    let Ok(entries) = fs::read_dir(paths::plugins_dir()?) else {
+        return Ok(std::collections::HashSet::new());
+    };
+    Ok(entries
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with(prefix))
+        .collect())
 }
 
 #[cfg(test)]

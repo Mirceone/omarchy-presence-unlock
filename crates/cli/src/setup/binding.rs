@@ -91,14 +91,12 @@ pub(super) fn remove() -> Result<(), String> {
     })
 }
 
-/// Applies the binding change, and refuses to call it applied if Hyprland
-/// rejected the file.
+/// What Hyprland currently reports as wrong with the user's config.
 ///
 /// # Errors
 ///
-/// Returns an error when Hyprland reports a configuration error.
-pub(super) fn reload_hyprland() -> Result<(), String> {
-    super::run(Command::new("hyprctl").arg("reload"))?;
+/// Returns an error when `hyprctl` cannot be run, e.g. outside a session.
+pub(super) fn config_errors() -> Result<String, String> {
     let output = Command::new("hyprctl")
         .arg("configerrors")
         .output()
@@ -109,12 +107,38 @@ pub(super) fn reload_hyprland() -> Result<(), String> {
             output.status
         ));
     }
-    let errors = String::from_utf8_lossy(&output.stdout);
-    if errors.trim().is_empty() {
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Applies the binding change, and refuses to call it applied if Hyprland
+/// reports an error that was not there before the edit.
+///
+/// `configerrors` covers the whole config, so an unrelated, pre-existing
+/// mistake elsewhere must not be blamed on this binding.
+///
+/// # Errors
+///
+/// Returns an error when the reload fails or introduced a new error.
+pub(super) fn reload_hyprland(baseline: &str) -> Result<(), String> {
+    super::run(Command::new("hyprctl").arg("reload"))?;
+    let after = config_errors()?;
+    let introduced = new_errors(baseline, &after);
+    if introduced.is_empty() {
         Ok(())
     } else {
-        Err(format!("Hyprland rejected the presence binding:\n{errors}"))
+        Err(format!(
+            "Hyprland reported new configuration errors:\n{}",
+            introduced.join("\n")
+        ))
     }
+}
+
+fn new_errors<'a>(before: &str, after: &'a str) -> Vec<&'a str> {
+    after
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !before.lines().any(|old| old.trim() == *line))
+        .collect()
 }
 
 #[cfg(test)]
@@ -158,5 +182,20 @@ mod tests {
     fn a_malformed_managed_block_is_rejected() {
         assert!(render(BLOCK_START).is_err());
         assert!(render(&format!("{BLOCK_START}\n{BLOCK_START}\n{BLOCK_END}")).is_err());
+    }
+
+    /// An error already present before the edit belongs to the user, not to
+    /// this binding; only what the edit introduced may fail setup.
+    #[test]
+    fn only_errors_introduced_by_the_edit_count() {
+        let before = "error in monitors.lua line 3\n";
+        assert!(new_errors(before, "error in monitors.lua line 3\n").is_empty());
+        assert_eq!(
+            new_errors(
+                before,
+                "error in monitors.lua line 3\nerror in bindings.lua line 40\n"
+            ),
+            ["error in bindings.lua line 40"]
+        );
     }
 }

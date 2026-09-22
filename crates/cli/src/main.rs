@@ -264,6 +264,32 @@ fn uninstall(forget_devices: bool) -> Result<(), String> {
     }
 }
 
+/// Makes a saved config change take effect.
+///
+/// presenced reads `config.toml` once at startup, so a removed device or a
+/// stricter rule is not enforced until it restarts. `try-restart` leaves a
+/// stopped daemon stopped: with nothing running, nothing enforces the old
+/// policy either.
+fn apply_config(changed: Result<(), String>) -> Result<(), String> {
+    changed?;
+    let restarted = std::process::Command::new("systemctl")
+        .args(["--user", "try-restart", "presenced.service"])
+        .status()
+        .map_err(|error| error.to_string())
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("systemctl exited with {status}"))
+            }
+        });
+    restarted.map_err(|error| {
+        format!(
+            "config saved, but presenced did not restart ({error}) and still enforces the previous devices; run `systemctl --user restart presenced`"
+        )
+    })
+}
+
 fn main() {
     let Cli { command } = Cli::parse();
     let result = match command {
@@ -273,7 +299,7 @@ fn main() {
             println!();
             Ok(())
         }
-        Some(Commands::Enroll { id }) => enroll(&id),
+        Some(Commands::Enroll { id }) => apply_config(enroll(&id)),
         Some(Commands::AddDevice {
             id,
             profile,
@@ -284,7 +310,7 @@ fn main() {
             threshold_dbm,
             minimum_samples,
             freshness_ms,
-        }) => devices::add(
+        }) => apply_config(devices::add(
             &id,
             &profile,
             &Criteria {
@@ -298,10 +324,10 @@ fn main() {
                 minimum_samples,
                 freshness_ms,
             },
-        ),
-        Some(Commands::RemoveDevice { id }) => devices::remove(&id),
+        )),
+        Some(Commands::RemoveDevice { id }) => apply_config(devices::remove(&id)),
         Some(Commands::MultiDeviceAuth { expression }) => {
-            devices::set_multi_device_auth(&expression)
+            apply_config(devices::set_multi_device_auth(&expression))
         }
         Some(Commands::Devices { adapter, scan_secs }) => {
             pairing::list_advertising(adapter.as_deref(), scan_secs)

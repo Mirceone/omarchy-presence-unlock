@@ -165,6 +165,18 @@ cd "$PROJECT_DIR"
 sudo --validate
 if $replace; then
   check_ownership
+  # From here the old package may be gone before the new one lands. If the
+  # script stops in that gap, keep the built package (a curl | bash build
+  # lives in a temporary directory) and say how to finish.
+  report_missing_package() {
+    pacman --query omarchy-presence-unlock >/dev/null 2>&1 && return
+    [[ -x /usr/bin/omarchy-presence-unlock ]] && return
+    local keep=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-presence-unlock
+    mkdir -p -- "$keep" && cp -f -- "$package_file" "$keep/" || keep=${package_file%/*}
+    printf 'install: the previous installation was removed, but the replacement was not installed.\n' >&2
+    printf 'install: finish with: sudo pacman -U %s\n' "$keep/${package_file##*/}" >&2
+  }
+  trap report_missing_package EXIT
   printf 'Removing the existing installation, keeping enrolled devices...\n'
   /usr/bin/omarchy-presence-unlock uninstall \
     || die "existing installation cleanup failed; replacement was not installed"
@@ -187,6 +199,7 @@ if $replace; then
 fi
 printf 'Installing %s...\n' "$(basename "$package_file")"
 sudo pacman --upgrade --noconfirm "$package_file"
+trap - EXIT
 
 [[ -x /usr/bin/omarchy-presence-unlock ]] \
   || die "the package installed, but its executable is missing"

@@ -34,9 +34,12 @@ fn run(command: &mut Command) -> Result<(), String> {
 /// its policy — belongs to whatever installed them, so everything here is work
 /// this user owns in their own session.
 ///
-/// Ordered so a machine is never left half integrated. The clone is rendered
-/// before anything is written, because an Omarchy release this version cannot
-/// patch must leave the session exactly as it was found.
+/// Ordered so a machine is never left half integrated. Everything that can
+/// be checked up front is: the clone is rendered and the Hyprland error
+/// baseline taken before anything is written. If a later step still fails on
+/// a first install, the lock, binding and menu are removed again so the stock
+/// lock is back in charge. A rerun over a working integration is not rolled
+/// back, because that would remove what was already working.
 ///
 /// # Errors
 ///
@@ -45,11 +48,28 @@ pub fn apply() -> Result<(), String> {
     let plugin_id = lock::plugin_id()?;
     service::policy_installed()?;
     let clone = lock::render_clone(&plugin_id)?;
+    let first_install = !lock::is_installed()?;
+    let baseline = binding::config_errors()?;
 
     lock::install(&plugin_id, &clone)?;
-    binding::install()?;
-    menu::install()?;
-    binding::reload_hyprland()?;
+    let integrated = binding::install()
+        .and_then(|()| menu::install())
+        .and_then(|()| binding::reload_hyprland(&baseline));
+    if let Err(error) = integrated {
+        if !first_install {
+            return Err(error);
+        }
+        let undone = lock::remove()
+            .and_then(|()| binding::remove())
+            .and_then(|()| menu::remove())
+            .and_then(|()| binding::reload_hyprland(&baseline));
+        return Err(match undone {
+            Ok(()) => format!("{error}\nSetup was undone; the stock lock is active."),
+            Err(undo) => format!(
+                "{error}\nUndoing setup also failed ({undo}); run `omarchy-presence-unlock uninstall`."
+            ),
+        });
+    }
 
     // After enabling, so a first install does not restart a shell that is
     // about to load the plugin anyway.

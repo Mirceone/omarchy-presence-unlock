@@ -4,7 +4,7 @@
 //! are separate so parsing never exposes unvalidated device identities to the daemon.
 
 use crate::{
-    ble::parse_address,
+    ble::{Address, parse_address},
     identity::Identity,
     paths,
     presence::{DeviceSpec, MultiDeviceAuth, Policy},
@@ -17,6 +17,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const CURRENT_SCHEMA: u8 = 4;
+
+/// The parts of an entry that name one physical device.
+type IdentityKey = (Option<[u8; 16]>, Option<Address>);
 
 /// The literal contents of `config.toml`.
 #[derive(Clone, Deserialize)]
@@ -111,6 +114,8 @@ pub enum ConfigError {
     UnsupportedProfile(String, String),
     #[error("duplicate device id {0}")]
     DuplicateDevice(String),
+    #[error("devices {0} and {1} identify the same device by {2}; one device would count twice")]
+    DuplicateIdentity(String, String, &'static str),
     #[error("no devices are configured; run `omarchy-presence-unlock enroll`")]
     NoDevices,
     #[error("unsupported multi-device authentication rule {0}; use any, all, or at-least:<n>")]
@@ -165,11 +170,38 @@ impl ConfigFile {
             return Err(ConfigError::NoDevices);
         }
         let mut devices = Vec::with_capacity(self.devices.len());
+        // One physical device enrolled under two ids would satisfy `all` or
+        // `at-least:2` by itself, so identities must be unique, not just ids.
+        let mut seen: Vec<(&str, IdentityKey)> = Vec::new();
         for entry in &self.devices {
             if devices.iter().any(|spec: &DeviceSpec| spec.id == entry.id) {
                 return Err(ConfigError::DuplicateDevice(entry.id.clone()));
             }
             devices.push(entry.resolve()?);
+            let irk = entry
+                .irk_base64
+                .as_deref()
+                .map(|text| decode_irk(&entry.id, text))
+                .transpose()?;
+            let address = entry
+                .address
+                .as_deref()
+                .and_then(|text| parse_address(text).ok());
+            for (other, (other_irk, other_address)) in &seen {
+                let by = if irk.is_some() && irk == *other_irk {
+                    "irk_base64"
+                } else if address.is_some() && address == *other_address {
+                    "address"
+                } else {
+                    continue;
+                };
+                return Err(ConfigError::DuplicateIdentity(
+                    (*other).to_string(),
+                    entry.id.clone(),
+                    by,
+                ));
+            }
+            seen.push((&entry.id, (irk, address)));
         }
         let multi_device_auth = self.multi_device_auth()?;
         if let MultiDeviceAuth::AtLeast(required) = multi_device_auth
@@ -235,6 +267,18 @@ impl DeviceEntry {
                     .map_err(|_| ConfigError::Device(self.id.clone(), "invalid service UUID"))
             })
             .transpose()?;
+        // `starts_with("")` is true for every named advertiser, so an empty
+        // prefix would authorise any device in radio range.
+        if self
+            .name_prefix
+            .as_deref()
+            .is_some_and(|prefix| prefix.trim().is_empty())
+        {
+            return Err(ConfigError::Device(
+                self.id.clone(),
+                "name_prefix must not be empty",
+            ));
+        }
         let identity = Identity {
             irk: irk.as_ref().map(crate::irk::IrkMatcher::new),
             address,
@@ -475,6 +519,20 @@ address = "AA:BB:CC:DD:EE:FF"
         ));
     }
 
+    /// An empty prefix matches every named advertiser in range.
+    #[test]
+    fn an_empty_name_prefix_is_rejected() {
+        for prefix in ["", "  "] {
+            let text = format!(
+                "schema_version = 4\n[[device]]\nid = \"any\"\nprofile = \"presence\"\nname_prefix = \"{prefix}\"\n"
+            );
+            assert!(matches!(
+                ConfigFile::parse(&text).unwrap().resolve(),
+                Err(ConfigError::Device(..))
+            ));
+        }
+    }
+
     #[test]
     fn duplicate_device_ids_are_rejected() {
         let text = format!(
@@ -484,6 +542,29 @@ address = "AA:BB:CC:DD:EE:FF"
             ConfigFile::parse(&text).unwrap().resolve(),
             Err(ConfigError::DuplicateDevice(_))
         ));
+    }
+
+    /// One device under two ids would satisfy `all` alone.
+    #[test]
+    fn one_identity_under_two_ids_is_rejected() {
+        for (first, second) in [
+            (
+                format!("irk_base64 = \"{IRK}\""),
+                format!("irk_base64 = \"{IRK}\""),
+            ),
+            (
+                "address = \"AA:BB:CC:DD:EE:FF\"".to_string(),
+                "address = \"aa:bb:cc:dd:ee:ff\"".to_string(),
+            ),
+        ] {
+            let text = format!(
+                "schema_version = 4\nmulti_device_auth = \"all\"\n[[device]]\nid = \"a\"\nprofile = \"presence\"\n{first}\n\n[[device]]\nid = \"b\"\nprofile = \"presence\"\n{second}\n"
+            );
+            assert!(matches!(
+                ConfigFile::parse(&text).unwrap().resolve(),
+                Err(ConfigError::DuplicateIdentity(..))
+            ));
+        }
     }
 
     #[test]

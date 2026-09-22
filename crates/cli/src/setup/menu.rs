@@ -23,9 +23,10 @@ pub(super) const REMOVE_ENTRY_ID: &str = "remove.security.presence";
 
 const ICON: &str = "\u{f0990}";
 
-/// Whether the lock plugin is installed, as a shell condition the menu can
-/// evaluate.
-const APPLIED: &str = "[ -d \"$HOME/.config/omarchy/plugins/${USER}.lock\" ]";
+/// Whether the generated presence lock is installed, as a shell condition the
+/// menu can evaluate. The marker check keeps a user's own `<user>.lock` clone
+/// from being offered for removal as if it were this integration.
+const APPLIED: &str = "grep -qsF 'omarchy-presence-unlock:presence' \"$HOME/.config/omarchy/plugins/${USER}.lock/Service.qml\"";
 
 #[derive(Clone, Copy)]
 enum Integration {

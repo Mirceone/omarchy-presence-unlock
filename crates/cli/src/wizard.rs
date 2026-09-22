@@ -156,7 +156,9 @@ fn configured_adapter() -> Option<String> {
 /// the first device is enrolled on a fresh installation.
 fn reload_daemon() -> Result<(), String> {
     systemctl(&["restart", UNLOCKD])
-        .map_err(|error| format!("config saved, but {UNLOCKD} did not restart: {error}"))
+        .map_err(|error| {
+            format!("config saved, but {UNLOCKD} did not restart and still enforces the previous devices: {error}")
+        })
 }
 
 /// The privileged IRK monitor runs under `sudo` with an inherited stdin, and
