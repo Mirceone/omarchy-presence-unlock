@@ -210,16 +210,16 @@ static APPLE_WATCH: Provider = Provider {
 };
 
 static PHONE: Provider = Provider {
-    id: "phone",
+    id: "phone-le",
     profile: PRESENCE,
     fallback: "phone",
     guide: Guide {
-        label: "Phone",
-        summary: "Your computer will appear as a pairable Bluetooth accessory.",
+        label: "Phone (Bluetooth LE pairing)",
+        summary: "Your computer will appear as a pairable Bluetooth LE accessory.",
         steps: &PHONE_STEPS,
         hint: "Open Settings → Bluetooth on the phone and tap this computer under Other Devices.",
     },
-    description: "Advertise this computer as pairable and capture the phone IRK during SMP",
+    description: "Advertise over Bluetooth LE and capture the phone IRK during LE SMP",
 };
 
 pub static PROVIDERS: [&Provider; 2] = [&APPLE_WATCH, &PHONE];
@@ -342,7 +342,7 @@ mod tests {
     /// provider must not enroll under a profile that claims device state.
     #[test]
     fn only_providers_whose_device_proves_its_state_may_attest_one() {
-        let phone = find("phone").expect("the phone provider is registered");
+        let phone = find("phone-le").expect("the LE phone provider is registered");
         assert!(!phone.profile().attests_device_state());
         let watch = find("apple-watch").expect("the Apple Watch provider is registered");
         assert!(watch.profile().attests_device_state());
@@ -360,7 +360,7 @@ mod tests {
             values,
             [
                 ("apple-watch", "apple-continuity", "watch"),
-                ("phone", "presence", "phone"),
+                ("phone-le", "presence", "phone"),
             ]
         );
     }

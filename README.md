@@ -14,6 +14,17 @@ Run the installer as your normal desktop user, without `sudo`:
 curl -fsSL https://raw.githubusercontent.com/Mirceone/omarchy-presence-unlock/main/install.sh | bash
 ```
 
+If an installation already exists, the installer shows its package version
+(or identifies an older unpackaged install) and asks **Overwrite? [y/N]**.
+Answering no leaves it untouched. Answering yes builds and validates the new
+package first, then uninstalls the old application and installs the replacement,
+preserving enrolled devices. The prompt reads from your terminal, including
+when using `curl | bash`; unattended replacement is refused.
+
+Files owned by another package, separate copies shadowing the command on PATH,
+and installations without a working uninstaller are not overwritten. Resolve
+the reported conflict or repair the old installation before trying again.
+
 If it was installed over SSH or outside your graphical Omarchy session, run the
 following after logging in:
 
@@ -35,8 +46,13 @@ from a newer Omarchy lock screen. It is safe to do so at any time.
 
 ```sh
 omarchy-presence-unlock uninstall
-sudo pacman -Rns omarchy-presence-unlock
 ```
+
+The menu's **Uninstall** action does the same: it restores Omarchy's built-in
+lock, removes your integration, and uses `sudo` and pacman to remove the installed
+application package. Package removal affects every user on the computer; other
+users' personal settings are not deleted. If integration cleanup fails, the
+package stays installed so you can fix the reported problem and retry.
 
 Your enrolled devices remain available unless you choose `--forget-devices`, so
 you can return without enrolling them again.

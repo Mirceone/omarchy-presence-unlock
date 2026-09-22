@@ -1623,12 +1623,11 @@ fn uninstall_head(screen: &Screen, enrolled: usize) -> Frame {
     frame.bullet("the presence lock plugin, restoring Omarchy's own lock screen");
     frame.bullet("the Omarchy menu entry");
     frame.bullet("the Alt unlock binding");
-    frame.bullet("the presence service");
+    frame.bullet("the presence service and installed application package");
     frame.blank();
-    // The installed files are a package's, however they were installed, so
-    // this says who removes them rather than offering to.
-    frame.line("The installed program stays; remove it with:");
-    frame.bullet("sudo pacman -Rns omarchy-presence-unlock");
+    frame.line("Administrator access is required to remove the package.");
+    frame.line("Package removal affects every user on this computer.");
+    frame.line("Other users' personal settings are not deleted.");
     frame.blank();
     frame.line(match enrolled {
         0 => "Nothing is enrolled.".to_string(),
@@ -1653,18 +1652,21 @@ fn uninstall_report(screen: &Screen, steps: &[setup::Step]) -> Frame {
         );
     }
     frame.blank();
-    frame.line("To remove the program itself:");
-    frame.bullet("sudo pacman -Rns omarchy-presence-unlock");
+    if steps.iter().all(|step| step.ok) {
+        frame.line("The application has been uninstalled. This menu will close.");
+    } else {
+        frame.line("Uninstall did not complete. Review the failed steps and retry.");
+    }
     frame
 }
 
-/// Removal, with the one decision that cannot be undone made explicitly.
-fn uninstall(screen: &Screen) -> Action {
+/// Returns true after complete removal so the caller exits the application.
+fn uninstall(screen: &Screen) -> Result<bool, String> {
     let enrolled = enrolled_devices().len();
-    let mut items = vec!["Remove, keep enrolled devices".to_string()];
-    if enrolled > 0 {
-        items.push("Remove everything, including enrolled devices".to_string());
-    }
+    let mut items = vec![
+        "Uninstall, keep enrolled devices".to_string(),
+        "Uninstall and forget enrolled devices".to_string(),
+    ];
     items.push("Back".into());
     let back = items.len() - 1;
 
@@ -1683,10 +1685,19 @@ fn uninstall(screen: &Screen) -> Action {
         setup::Enrollment::Forget
     };
 
-    prime_sudo(screen, "Uninstall", "")?;
+    screen.draw_above_output(&uninstall_head(screen, enrolled))?;
     let steps = setup::uninstall(enrollment);
-    show(screen, uninstall_report(screen, &steps))?;
-    Ok(false)
+    let complete = steps.iter().all(|step| step.ok);
+    let mut report = uninstall_report(screen, &steps);
+    report.blank();
+    report.dim(if complete {
+        "Press Esc to exit"
+    } else {
+        ui::NAV_RETURN
+    });
+    screen.draw(&report)?;
+    ui::wait_for_dismiss(screen)?;
+    Ok(complete)
 }
 
 /// The setup command owns the lock-screen integration: it is applied by the
@@ -1740,7 +1751,10 @@ pub fn run() -> Result<(), String> {
             2 => choose_multi_device_auth(&screen),
             3 => diagnostics(&screen).map(|()| false),
             4 => live_status(&screen),
-            _ => uninstall(&screen),
+            _ => match uninstall(&screen) {
+                Ok(true) => return Ok(()),
+                result => result,
+            },
         };
         // Ctrl+C during the action asked to leave, and the action has now
         // unwound. Returning rather than exiting is the point: `AltScreen`

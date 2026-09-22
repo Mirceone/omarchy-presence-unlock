@@ -8,7 +8,7 @@
 # pacman treats one as an upgrade of the other.
 
 pkgname=omarchy-presence-unlock
-pkgver=0.1.0.r6.g87e50f4
+pkgver=0.1.0.r15.g57131b7
 pkgrel=1
 pkgdesc='BLE device presence unlock for Omarchy (local build)'
 arch=('x86_64')

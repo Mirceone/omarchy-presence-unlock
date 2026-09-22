@@ -139,10 +139,9 @@ enum Commands {
     /// service. Unprivileged, and safe to rerun after an Omarchy or package
     /// update.
     Setup,
-    /// Remove the per-user integration: the presence lock plugin, restoring
-    /// Omarchy's built-in lock, plus the Alt binding, the menu entry, the
-    /// presence service, and optionally the enrolled devices. The program
-    /// itself is a package; remove it with pacman.
+    /// Uninstall the application: restore Omarchy's built-in lock, remove this
+    /// user's integration, then remove the system-wide package through sudo.
+    /// Enrolled devices are preserved unless --forget-devices is given.
     Uninstall {
         /// Also delete the enrolled devices and their keys.
         #[arg(long)]
@@ -235,10 +234,8 @@ fn status() -> Result<(), String> {
     Ok(())
 }
 
-/// Removes the integration and the service, reporting each step as it goes.
-///
-/// Every step is attempted whatever the ones before it did, so a single
-/// failure — a declined sudo prompt, say — cannot strand the rest.
+/// Removes this user's integration and the system-wide application package.
+/// Reports partial removal as an error rather than claiming success.
 fn uninstall(forget_devices: bool) -> Result<(), String> {
     let steps = setup::uninstall(if forget_devices {
         setup::Enrollment::Forget
@@ -260,7 +257,6 @@ fn uninstall(forget_devices: bool) -> Result<(), String> {
             eprintln!("failed: {line}");
         }
     }
-    println!("to remove the program itself: sudo pacman -Rns omarchy-presence-unlock");
     if failed == 0 {
         Ok(())
     } else {

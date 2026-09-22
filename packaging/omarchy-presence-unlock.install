@@ -9,5 +9,6 @@ post_upgrade() {
 }
 
 pre_remove() {
-  echo "Per-user integration is not package-owned; remove its plugin symlink, binding, units, and enrolled devices with 'omarchy-presence-unlock uninstall'."
+  echo "Removing the application package. Per-user settings are not package-owned."
+  echo "The application's uninstall command cleans the current user's integration before package removal; other users' settings are left untouched."
 }

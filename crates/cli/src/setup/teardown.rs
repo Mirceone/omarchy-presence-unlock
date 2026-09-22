@@ -1,19 +1,13 @@
-//! Undoing the per-user half of the integration.
+//! Removing the user's integration, then the system-wide package.
 //!
-//! Only the user's own half: the installed files are a package's, whichever
-//! way they were installed, so `pacman -Rns` removes them. That is what keeps
-//! this unprivileged and keeps one owner per file.
-//!
-//! Teardown is deliberately not atomic the way [`super::apply`] is. Setup
-//! must leave the machine either integrated or untouched, because a half
-//! integration is a lock screen that cannot authenticate. Removal is the
-//! opposite: a step that fails must not strand the steps after it, or a user
-//! trying to get rid of this is left with the parts that broke and no way to
-//! reach the parts that would have worked. So every step runs, and each
-//! reports for itself.
+//! Authenticate before changing anything. All per-user cleanup steps are
+//! attempted, but the package stays installed if any fail: removing the PAM
+//! module while the presence lock is still active would leave a broken lock
+//! integration and no installed command with which to retry cleanup.
 
 use super::{binding, lock, menu, paths, service};
 use omarchy_presence_unlock_protocol::paths as protocol_paths;
+use std::process::Command;
 
 /// One thing removal attempted, in the order attempted.
 pub struct Step {
@@ -52,12 +46,18 @@ fn forget_enrollment() -> Result<(), String> {
     paths::remove_if_present(&config)
 }
 
-/// Undoes the integration, the service, and optionally the enrollment.
+/// Removes the integration, optionally the enrollment, and the installed package.
 ///
-/// Every step is attempted whatever the ones before it did; the returned list
-/// is what happened, in order.
+/// Package removal requires administrator access and affects every user.
+/// Failed cleanup leaves the package installed so the user can retry.
 pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
-    let mut steps = Vec::new();
+    let mut steps = vec![step(
+        "Administrator access confirmed",
+        super::run(Command::new("sudo").arg("--validate")),
+    )];
+    if !steps[0].ok {
+        return steps;
+    }
 
     steps.push(step(
         format!(
@@ -81,6 +81,22 @@ pub fn uninstall(enrollment: Enrollment) -> Vec<Step> {
     if matches!(enrollment, Enrollment::Forget) {
         steps.push(step("Forgot the enrolled devices", forget_enrollment()));
     }
+    let removal = if steps.iter().all(|step| step.ok) {
+        // Remove only our package, without retaining package-owned .pacsave
+        // files or recursively removing dependencies used by other software.
+        super::run(Command::new("sudo").args([
+            "--non-interactive",
+            "pacman",
+            "--remove",
+            "--nosave",
+            "--noconfirm",
+            "--",
+            "omarchy-presence-unlock",
+        ]))
+    } else {
+        Err("package kept installed because integration cleanup failed; fix the failed steps and rerun uninstall".into())
+    };
+    steps.push(step("Removed the installed application package", removal));
     steps
 }
 
