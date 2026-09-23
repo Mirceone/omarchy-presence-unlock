@@ -69,9 +69,13 @@ fn write_atomic_checked(
             .map_err(|error| error.to_string())?;
         file.set_permissions(fs::Permissions::from_mode(mode))
             .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
         check()?;
-        fs::rename(&temporary, path).map_err(|error| error.to_string())
+        fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

@@ -307,14 +307,18 @@ impl Fleet {
         }
         let required = self.multi_device_auth.required(self.devices.len());
         let mut allowed = 0;
-        let mut closest = Decision::Deny(wire::DENY_NO_DEVICE);
+        let mut closest_deny = wire::DENY_NO_DEVICE;
+        let mut closest_rank = Decision::Deny(closest_deny).rank();
         for device in &self.devices {
-            let decision = device.check(now_ms);
-            if decision.is_allow() {
-                allowed += 1;
-            }
-            if decision.rank() < closest.rank() {
-                closest = decision;
+            match device.check(now_ms) {
+                Decision::Allow => allowed += 1,
+                Decision::Deny(reason) => {
+                    let rank = Decision::Deny(reason).rank();
+                    if rank < closest_rank {
+                        closest_deny = reason;
+                        closest_rank = rank;
+                    }
+                }
             }
         }
         if allowed >= required {
@@ -325,10 +329,7 @@ impl Fleet {
         if allowed > 0 {
             return Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH);
         }
-        match closest {
-            Decision::Allow => Decision::Deny(wire::DENY_MULTI_DEVICE_AUTH),
-            deny @ Decision::Deny(_) => deny,
-        }
+        Decision::Deny(closest_deny)
     }
 
     /// Per-device breakdown for `status`. Ordered as configured.

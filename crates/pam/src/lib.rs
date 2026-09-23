@@ -23,7 +23,7 @@ use std::{
 /// The complete control-socket exchange is bounded so a stalled daemon cannot
 /// wedge the lock-screen authentication conversation.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_millis(100);
-const MAX_REPLY_BYTES: usize = wire::RESP_ALLOW.len();
+const MAX_REPLY_BYTES: usize = 64;
 const PASSWD_PATH: &str = "/etc/passwd";
 
 struct PresencePam;
@@ -143,7 +143,7 @@ fn account_uid(passwd: &[u8], user: &[u8]) -> Option<u32> {
     result
 }
 
-fn exchange(path: &Path) -> Option<[u8; MAX_REPLY_BYTES]> {
+fn exchange(path: &Path) -> Option<Reply> {
     let deadline = Instant::now().checked_add(EXCHANGE_TIMEOUT)?;
     let mut stream = connect(path, deadline).ok()?;
     stream.set_nonblocking(true).ok()?;
@@ -176,10 +176,7 @@ fn write_until_deadline(
     Some(())
 }
 
-fn read_reply_until_deadline(
-    stream: &mut UnixStream,
-    deadline: Instant,
-) -> Option<[u8; MAX_REPLY_BYTES]> {
+fn read_reply_until_deadline(stream: &mut UnixStream, deadline: Instant) -> Option<Reply> {
     let mut reply = [0; MAX_REPLY_BYTES];
     let mut used = 0;
     loop {
@@ -188,9 +185,10 @@ fn read_reply_until_deadline(
             Ok(0) => return None,
             Ok(read) => {
                 used += read;
-                if reply[..used].contains(&b'\n') {
-                    return (used == reply.len() && reply == wire::RESP_ALLOW.as_bytes())
-                        .then_some(reply);
+                if let Some(newline) = reply[..used].iter().position(|byte| *byte == b'\n') {
+                    return (newline + 1 == used)
+                        .then(|| parse_reply(&reply[..used]))
+                        .flatten();
                 }
                 if used == reply.len() {
                     return None;
@@ -222,11 +220,24 @@ fn millis_until(deadline: Instant) -> Option<PollTimeout> {
     PollTimeout::try_from(i32::try_from(milliseconds).ok()?).ok()
 }
 
-fn reply_result(reply: [u8; MAX_REPLY_BYTES]) -> PamReturnCode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reply {
+    Allow,
+    Deny,
+}
+
+fn parse_reply(reply: &[u8]) -> Option<Reply> {
     if reply == wire::RESP_ALLOW.as_bytes() {
-        PamReturnCode::Success
-    } else {
-        PamReturnCode::Auth_Err
+        return Some(Reply::Allow);
+    }
+    let reason = reply.strip_prefix(b"DENY ")?.strip_suffix(b"\n")?;
+    (!reason.is_empty() && reason.iter().all(u8::is_ascii_graphic)).then_some(Reply::Deny)
+}
+
+fn reply_result(reply: Reply) -> PamReturnCode {
+    match reply {
+        Reply::Allow => PamReturnCode::Success,
+        Reply::Deny => PamReturnCode::Auth_Err,
     }
 }
 
@@ -311,12 +322,21 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_exact_allow_reply() {
-        assert_eq!(reply_result(*b"ALLOW\n"), PamReturnCode::Success);
+    fn reply_mapping_accepts_allow_and_deny_but_rejects_malformed_or_overlong_lines() {
+        assert_eq!(
+            parse_reply(wire::RESP_ALLOW.as_bytes()).map(reply_result),
+            Some(PamReturnCode::Success)
+        );
+        assert_eq!(
+            parse_reply(b"DENY stale\n").map(reply_result),
+            Some(PamReturnCode::Auth_Err)
+        );
+        assert_eq!(parse_reply(b"DENY \n"), None);
+        assert_eq!(parse_reply(&[b'x'; MAX_REPLY_BYTES + 1]), None);
     }
 
     #[test]
-    fn oversized_no_newline_and_slow_drip_fail_closed_within_one_deadline() {
+    fn unterminated_and_slow_replies_fail_closed_within_one_deadline() {
         for response in [b"TOO-LONG\n".as_slice(), b"ALLOW".as_slice()] {
             let (path, server) = test_server(move |mut stream| {
                 let mut request = [0; wire::REQ_CHECK.len()];
@@ -327,6 +347,15 @@ mod tests {
             server.join().unwrap();
             fs::remove_file(path).unwrap();
         }
+
+        let (path, server) = test_server(|mut stream| {
+            let mut request = [0; wire::REQ_CHECK.len()];
+            stream.read_exact(&mut request).unwrap();
+            let _ = stream.write_all(&[b'x'; MAX_REPLY_BYTES + 1]);
+        });
+        assert!(exchange(&path).is_none());
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
 
         let (path, server) = test_server(|mut stream| {
             let mut request = [0; wire::REQ_CHECK.len()];
@@ -346,15 +375,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_complete_allow_reply() {
-        let (path, server) = test_server(|mut stream| {
-            let mut request = [0; wire::REQ_CHECK.len()];
-            stream.read_exact(&mut request).unwrap();
-            stream.write_all(wire::RESP_ALLOW.as_bytes()).unwrap();
-        });
-        assert_eq!(exchange(&path), Some(*b"ALLOW\n"));
-        server.join().unwrap();
-        fs::remove_file(path).unwrap();
+    fn maps_complete_allow_and_deny_replies() {
+        for (response, expected) in [
+            (wire::RESP_ALLOW.as_bytes(), Reply::Allow),
+            (b"DENY stale\n".as_slice(), Reply::Deny),
+        ] {
+            let (path, server) = test_server(move |mut stream| {
+                let mut request = [0; wire::REQ_CHECK.len()];
+                stream.read_exact(&mut request).unwrap();
+                stream.write_all(response).unwrap();
+            });
+            assert_eq!(exchange(&path), Some(expected));
+            server.join().unwrap();
+            fs::remove_file(path).unwrap();
+        }
     }
 
     fn test_server(

@@ -8,13 +8,13 @@
 # pacman treats one as an upgrade of the other.
 
 pkgname=omarchy-presence-unlock
-pkgver=0.1.0.r16.gf6a5586
+pkgver=0.1.0
 pkgrel=1
 pkgdesc='BLE device presence unlock for Omarchy (local build)'
 arch=('x86_64')
 url='https://github.com/mirceone/omarchy-presence-unlock'
 license=('MIT')
-install=../omarchy-presence-unlock.install
+install="${OPU_INSTALL_FILE:-../omarchy-presence-unlock.install}"
 backup=('etc/pam.d/omarchy-lock-presence')
 # No makedepends: this builds with whatever cargo is on the invoking user's
 # PATH, which for rustup or mise is not a pacman package at all. install.sh
@@ -22,13 +22,13 @@ backup=('etc/pam.d/omarchy-lock-presence')
 # package's, so both packages sharing this pkgname carry the same metadata.
 depends=('bluez' 'pam' 'omarchy' 'hyprland' 'systemd')
 makedepends=()
-# The sources are the checkout itself, reached through $startdir rather than
-# copied, so a rebuild reuses the existing target directory.
+# `install.sh` builds from a disposable copy of this recipe so `makepkg` cannot
+# rewrite the tracked `pkgver=` placeholder.
 source=()
 options=('!debug')
 
 _repo() {
-  printf '%s' "$startdir/../.."
+  printf '%s' "${OPU_SOURCE_DIR:-$startdir/../..}"
 }
 
 pkgver() {

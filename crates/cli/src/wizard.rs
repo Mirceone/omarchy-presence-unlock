@@ -29,13 +29,16 @@ use crate::{client, devices, doctor, enrollment, interrupt, pairing, setup, ui};
 use cancellable::{LiveStatusReader, run_cancellable};
 use daemon::{DaemonPause, UNLOCKD, restart_unlockd, systemctl, unlockd_is_active};
 use enrollment::{Cleanup, Phase, Progress};
+use nix::sys::termios::{SetArg, Termios, tcgetattr, tcsetattr};
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile, presence::MultiDeviceAuth, profile, wire,
 };
 use std::{
+    io::{IsTerminal as _, stdin},
+    os::fd::AsFd as _,
     process::Command,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -48,10 +51,18 @@ use std::{
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 
-/// Whether an action left output on screen that the user still needs to
-/// read. Flows that end on their own screen leave nothing behind, so the menu
-/// repaints immediately instead of demanding a keystroke to dismiss it.
-type Action = Result<bool, String>;
+/// Every ordinary menu action completes on its own screen.
+type Action = Result<(), String>;
+
+/// Uninstall alone changes whether the main menu should continue.
+enum Next {
+    Stay,
+    Exit,
+}
+
+/// Saved before the alternate screen or any raw-mode reader changes the
+/// terminal, so a forced exit can restore the shell exactly as it found it.
+static STARTUP_TERMIOS: OnceLock<Mutex<Option<Termios>>> = OnceLock::new();
 
 /// Owns the alternate screen buffer for as long as the menu runs. `Drop`
 /// covers the ordinary returns and any `?` on the way out; the SIGINT path
@@ -87,10 +98,19 @@ fn restore(term: &console::Term) {
 
 /// `install` takes a plain `fn`, and the handler has no terminal to hand it.
 fn restore_terminal() {
-    // Leaves the alternate buffer first, so anything the restart prints lands
-    // in the shell's scrollback where it survives instead of being wiped.
+    // The interrupt path races the painter. `force_quit` sets its shared flag
+    // first, so no later draw or poll can put the terminal back into raw mode.
+    let restarted = restart_unlockd();
+    if let Some(saved) = STARTUP_TERMIOS
+        .get()
+        .and_then(|saved| saved.lock().ok())
+        .and_then(|saved| saved.as_ref().cloned())
+    {
+        let stdin = stdin();
+        let _ = tcsetattr(stdin.as_fd(), SetArg::TCSANOW, &saved);
+    }
     restore(&console::Term::stdout());
-    match restart_unlockd() {
+    match restarted {
         Ok(true) => println!("Restarted {UNLOCKD}."),
         Ok(false) => {}
         Err(error) => eprintln!("warning: {error}"),
@@ -167,9 +187,10 @@ fn reload_daemon() -> Result<(), String> {
 /// losing characters from the passphrase. Priming the credential cache before
 /// the flow starts keeps any prompt outside that region.
 ///
-/// Returns without touching the screen when the cache is already warm, which
-/// is the common case on a second attempt.
-fn prime_sudo(screen: &Screen, title: &str, step: &str) -> Result<(), String> {
+/// Returns whether a non-interactive sudo check confirms the cache is warm
+/// after any password prompt. A policy with no credential cache must not let
+/// the monitor start, because it would prompt while the key poller owns stdin.
+fn prime_sudo(screen: &Screen, title: &str, step: &str) -> Result<bool, String> {
     let warm = Command::new("sudo")
         .args(["--non-interactive", "true"])
         .stdout(std::process::Stdio::null())
@@ -177,7 +198,7 @@ fn prime_sudo(screen: &Screen, title: &str, step: &str) -> Result<(), String> {
         .status()
         .is_ok_and(|status| status.success());
     if warm {
-        return Ok(());
+        return Ok(true);
     }
     let mut frame = screen.frame();
     frame.title(title, Some(step));
@@ -186,10 +207,13 @@ fn prime_sudo(screen: &Screen, title: &str, step: &str) -> Result<(), String> {
     frame.line("which needs administrator access.");
     frame.blank();
     screen.draw_above_output(&frame)?;
-    // Best-effort: a declined prompt or no sudo at all leaves enrollment to
-    // fail on its own terms, with a message about what it could not do.
     let _ = Command::new("sudo").arg("--validate").status();
-    Ok(())
+    Ok(Command::new("sudo")
+        .args(["--non-interactive", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success()))
 }
 
 /// A screen with nothing to choose, shown until it is dismissed.
@@ -215,7 +239,7 @@ fn problem(screen: &Screen, title: &str, error: &str) -> Action {
     frame.blank();
     frame.warn(&ui::sentence(error));
     show(screen, frame)?;
-    Ok(false)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +519,7 @@ fn pairing_details(
     screen: &Screen,
     state: &PairState,
     error: &str,
-    daemon: &Result<(), String>,
+    daemon: &Result<bool, String>,
 ) -> Result<(), String> {
     let mut frame = screen.frame();
     frame.title("Pairing details", None);
@@ -520,17 +544,13 @@ fn pairing_details(
         );
     }
     match daemon {
-        Ok(()) => frame.mark(Mark::Done, "Unlock service resumed"),
+        Ok(true) => frame.mark(Mark::Done, "Unlock service resumed"),
+        Ok(false) => {}
         Err(error) => frame.mark(Mark::Failed, error),
     }
     show(screen, frame)
 }
 
-/// The instructions shown before anything is started.
-///
-/// Deliberately a separate screen: beginning the long operation and printing
-/// the instructions while it is already running gives the user no moment to
-/// read them, and no way to back out.
 fn pair_instructions(
     screen: &Screen,
     provider: &enrollment::Provider,
@@ -552,19 +572,17 @@ fn pair_instructions(
     }
     head.blank();
     head.line("The unlock service will pause during pairing and resume afterward.");
-
-    let choice = Menu::new(head, vec!["Continue".into(), "Back".into()])
+    Ok(Menu::new(head, vec!["Continue".into(), "Back".into()])
         .footer(ui::NAV_BACK)
-        .run(screen)?;
-    Ok(choice == Some(0))
+        .run(screen)?
+        == Some(0))
 }
 
-/// Everything the success screen states, without the menu under it.
 fn pair_success_frame(
     screen: &Screen,
     provider: &enrollment::Provider,
     state: &PairState,
-    daemon: &Result<(), String>,
+    daemon: &Result<bool, String>,
 ) -> Frame {
     let label = provider.label();
     let mut frame = screen.frame();
@@ -576,56 +594,50 @@ fn pair_success_frame(
     frame.mark(Mark::Done, "Pairing completed");
     frame.mark(Mark::Done, "Device identity verified");
     match daemon {
-        Ok(()) => frame.mark(Mark::Done, "Unlock service resumed"),
+        Ok(true) => frame.mark(Mark::Done, "Unlock service resumed"),
+        Ok(false) => {}
         Err(error) => frame.mark(Mark::Failed, error),
     }
     frame.blank();
     frame.line("Device");
     frame.field("Name", state.device_name.as_deref().unwrap_or(label));
-    // The flow names the enrollment after the device, so the id it reported
-    // is the only correct one to show here.
-    frame.field("ID", state.enrolled_id.as_deref().unwrap_or("\u{2014}"));
+    frame.field("ID", state.enrolled_id.as_deref().unwrap_or("—"));
     frame.field("Security", provider.profile().label());
     frame.field("Unlock", unlock_state());
     frame
 }
 
-/// Everything after a successful capture: what happened, what was enrolled,
-/// and the two things worth doing next.
 fn pair_success(
     screen: &Screen,
     provider: &enrollment::Provider,
     state: &PairState,
-    daemon: &Result<(), String>,
+    daemon: &Result<bool, String>,
 ) -> Action {
     loop {
-        let head = pair_success_frame(screen, provider, state, daemon);
-        let choice = Menu::new(head, vec!["Done".into(), "View diagnostics".into()])
-            .footer(ui::NAV_SELECT)
-            .run(screen)?;
+        let choice = Menu::new(
+            pair_success_frame(screen, provider, state, daemon),
+            vec!["Done".into(), "View diagnostics".into()],
+        )
+        .footer(ui::NAV_SELECT)
+        .run(screen)?;
         match choice {
             Some(1) => diagnostics(screen)?,
-            // Done, and Esc, both mean the flow is over.
-            _ => return Ok(false),
+            _ => return Ok(()),
         }
     }
 }
 
-/// Offers the ways out of a failed pairing. `true` asks for another attempt.
 fn pair_failure(
     screen: &Screen,
     provider: &enrollment::Provider,
     state: &PairState,
     error: &str,
-    daemon: &Result<(), String>,
+    daemon: &Result<bool, String>,
 ) -> Result<bool, String> {
     let (headline, tips) = failure_advice(provider.label(), provider.guide().hint, state.rank());
     loop {
         let mut head = screen.frame();
-        head.title(
-            &format!("Couldn\u{2019}t enroll {}", provider.label()),
-            None,
-        );
+        head.title(&format!("Couldn’t enroll {}", provider.label()), None);
         head.blank();
         head.line(headline.clone());
         head.blank();
@@ -634,7 +646,6 @@ fn pair_failure(
         for tip in &tips {
             head.bullet(tip);
         }
-
         let choice = Menu::new(
             head,
             vec!["Try again".into(), "View details".into(), "Back".into()],
@@ -649,21 +660,18 @@ fn pair_failure(
     }
 }
 
-/// One attempt: pause the daemon, run the capture, and paint its progress.
 fn run_pairing(
     screen: &Screen,
     provider: &'static enrollment::Provider,
     advertised_as: &str,
-) -> (PairState, Result<(), String>, bool, Result<(), String>) {
+) -> (PairState, Result<(), String>, bool, Result<bool, String>) {
     let state = Arc::new(Mutex::new(PairState::default()));
     let worker_state = Arc::clone(&state);
     let adapter = configured_adapter();
     let provider_id = provider.id();
-
     let pause = DaemonPause::stop();
     let started = Instant::now();
     let budget = Duration::from_secs(ENROLL_TIMEOUT_SECS);
-
     let mut painted: Option<Frame> = None;
     let (result, cancelled) = run_cancellable(
         move |cancel| {
@@ -693,24 +701,17 @@ fn run_pairing(
                 advertised_as,
                 budget.saturating_sub(started.elapsed()),
             );
-            // Only a changed screen is written, so the countdown ticks once a
-            // second instead of the poll repainting ten times over it.
             if painted.as_ref() != Some(&frame) {
                 let _ = screen.draw(&frame);
                 painted = Some(frame);
             }
         },
     );
-
     let mut daemon = pause.resume();
-    // A fresh install enables but does not start an unconfigured daemon. Once
-    // enrollment has written the first device, start it here; an already-active
-    // daemon was resumed by the pause guard above and needs no second restart.
-    if result.is_ok() && daemon.is_ok() && !unlockd_is_active() {
-        daemon = reload_daemon();
+    let enrolled = state.lock().is_ok_and(|state| state.enrolled_id.is_some());
+    if enrolled && daemon.as_ref().is_ok_and(|restarted| !restarted) && !unlockd_is_active() {
+        daemon = reload_daemon().map(|()| true);
     }
-    // The worker is finished, so nothing else holds the lock; a panic poisons
-    // it, but its error has already been returned through `run_cancellable`.
     let state = Arc::try_unwrap(state)
         .unwrap_or_else(|_| unreachable!("the worker thread has ended"))
         .into_inner()
@@ -718,17 +719,19 @@ fn run_pairing(
     (state, result, cancelled, daemon)
 }
 
-/// What a cancelled attempt left behind, which is the whole point of the
-/// screen: the user stopped a security operation part-way and is owed a
-/// statement about what state the machine is in.
-///
-/// Every line is a fact the flow reported, so a cleanup that failed says so
-/// rather than being papered over with the reassuring version.
-fn pair_cancelled_frame(screen: &Screen, state: &PairState, daemon: &Result<(), String>) -> Frame {
+fn pair_cancelled_frame(
+    screen: &Screen,
+    state: &PairState,
+    daemon: &Result<bool, String>,
+) -> Frame {
     let mut frame = screen.frame();
     frame.title("Pairing cancelled", None);
     frame.blank();
-    frame.line("No device was enrolled.");
+    frame.line(if state.enrolled_id.is_some() {
+        "A device was enrolled before cancellation."
+    } else {
+        "No device was enrolled."
+    });
     for cleanup in &state.cleanup {
         if cleanup.ok {
             frame.line(format!("{}.", cleanup.label));
@@ -737,52 +740,48 @@ fn pair_cancelled_frame(screen: &Screen, state: &PairState, daemon: &Result<(), 
         }
     }
     match daemon {
-        Ok(()) => frame.line("The unlock service is running again."),
+        Ok(true) => frame.line("The unlock service is running again."),
+        Ok(false) => {}
         Err(error) => frame.warn(error),
     }
     frame.blank();
-    frame.dim("Returning to device enrollment\u{2026}");
+    frame.dim("Returning to device enrollment…");
     frame
 }
 
-/// The full guided flow for one provider, from instructions to outcome.
 fn enroll_guided(screen: &Screen, provider: &'static enrollment::Provider) -> Action {
     let advertised_as = match pairing::adapter_alias(configured_adapter().as_deref()) {
         Ok(name) => name,
-        Err(error) => {
-            return problem(
-                screen,
-                &format!("Can\u{2019}t pair {}", provider.label()),
-                &error,
-            );
-        }
+        Err(error) => return problem(screen, &format!("Can’t pair {}", provider.label()), &error),
     };
-
     loop {
         if !pair_instructions(screen, provider, &advertised_as)? {
-            return Ok(false);
+            return Ok(());
         }
-        prime_sudo(
+        if !prime_sudo(
             screen,
             &format!("Pair {}", provider.label()),
             &PairFlow::Pairing.step(),
-        )?;
-
+        )? {
+            return problem(
+                screen,
+                &format!("Can’t pair {}", provider.label()),
+                "administrator access is needed for secure pairing",
+            );
+        }
         let (state, result, cancelled, daemon) = run_pairing(screen, provider, &advertised_as);
         match result {
             Ok(()) => return pair_success(screen, provider, &state, &daemon),
             Err(error) => {
-                // Ctrl+C asked to leave, and the operation has now unwound;
-                // the caller returns rather than painting another screen.
                 if interrupt::quit_requested() {
-                    return Ok(false);
+                    return Ok(());
                 }
                 if cancelled {
                     flash(screen, &pair_cancelled_frame(screen, &state, &daemon))?;
-                    return Ok(false);
+                    return Ok(());
                 }
                 if !pair_failure(screen, provider, &state, &error, &daemon)? {
-                    return Ok(false);
+                    return Ok(());
                 }
             }
         }
@@ -922,8 +921,15 @@ fn proximity_success(
             .footer(ui::NAV_SELECT)
             .run(screen)?;
         match choice {
-            Some(1) => adjust_sensitivity(screen, id, name, rssi)?,
-            _ => return Ok(false),
+            Some(1) => {
+                if let Err(error) = adjust_sensitivity(screen, id, name, rssi) {
+                    let mut frame = screen.frame();
+                    frame.title("Adjust sensitivity", None);
+                    frame.warn(&ui::sentence(&error));
+                    show(screen, frame)?;
+                }
+            }
+            _ => return Ok(()),
         }
     }
 }
@@ -1027,10 +1033,17 @@ fn find_proximity_device(screen: &Screen) -> Action {
         // The picker is not something to leave a user staring at after they
         // asked to quit.
         if interrupt::quit_requested() {
-            return Ok(false);
+            return Ok(());
         }
         let daemon = pause.resume();
-        let candidates = found?;
+        let candidates = match (found, daemon) {
+            (Ok(candidates), Ok(_)) => candidates,
+            (Err(scan), Ok(_)) => return problem(screen, "Scan failed", &scan),
+            (Err(scan), Err(restart)) => {
+                return problem(screen, "Scan failed", &format!("{scan}; {restart}"));
+            }
+            (Ok(_), Err(restart)) => return problem(screen, "Scan failed", &restart),
+        };
 
         let mut items: Vec<String> = candidates
             .iter()
@@ -1056,10 +1069,6 @@ fn find_proximity_device(screen: &Screen) -> Action {
         } else {
             head.line("Choose a nearby device:");
         }
-        if let Err(error) = &daemon {
-            head.blank();
-            head.warn(error);
-        }
 
         // Shows the full address only for whatever is highlighted: the list
         // stays readable, and the one address that matters is still visible.
@@ -1074,10 +1083,10 @@ fn find_proximity_device(screen: &Screen) -> Action {
         };
 
         let Some(choice) = Menu::new(head, items).detail(&detail).run(screen)? else {
-            return Ok(false);
+            return Ok(());
         };
         if choice == back {
-            return Ok(false);
+            return Ok(());
         }
         if choice == scan_again {
             continue;
@@ -1125,7 +1134,7 @@ fn enroll_manual_irk(screen: &Screen) -> Action {
         }
 
         let Some(typed) = ui::input(screen, &head, "IRK: ", true)? else {
-            return Ok(false);
+            return Ok(());
         };
         let irk = typed.trim().to_string();
         if irk.is_empty() {
@@ -1175,7 +1184,7 @@ fn enroll_manual_irk(screen: &Screen) -> Action {
                 .run(screen)?;
             match choice {
                 Some(1) => diagnostics(screen)?,
-                _ => return Ok(false),
+                _ => return Ok(()),
             }
         }
     }
@@ -1207,10 +1216,10 @@ fn enroll_menu(screen: &Screen) -> Action {
         head.line("Enroll a device");
 
         let Some(choice) = Menu::new(head, items).selected(selected).run(screen)? else {
-            return Ok(false);
+            return Ok(());
         };
         if choice == back {
-            return Ok(false);
+            return Ok(());
         }
         selected = choice;
         let outcome = if choice < enrollment::PROVIDERS.len() {
@@ -1221,7 +1230,7 @@ fn enroll_menu(screen: &Screen) -> Action {
             enroll_manual_irk(screen)
         };
         if interrupt::quit_requested() {
-            return Ok(false);
+            return Ok(());
         }
         // Every flow ends on a screen it drew itself, so anything left here is
         // an error that never got that far.
@@ -1246,7 +1255,7 @@ fn manage_devices(screen: &Screen) -> Action {
             head.blank();
             head.line("Nothing is enrolled yet.");
             show(screen, head)?;
-            return Ok(false);
+            return Ok(());
         }
         if let Some(warning) = &warning {
             head.blank();
@@ -1261,10 +1270,10 @@ fn manage_devices(screen: &Screen) -> Action {
         let back = items.len() - 1;
 
         let Some(choice) = Menu::new(head, items).selected(back).run(screen)? else {
-            return Ok(false);
+            return Ok(());
         };
         if choice == back {
-            return Ok(false);
+            return Ok(());
         }
 
         let (id, _) = &devices[choice];
@@ -1276,7 +1285,10 @@ fn manage_devices(screen: &Screen) -> Action {
             .footer(ui::NAV_BACK)
             .run(screen)?;
         if confirm == Some(1) {
-            devices::remove(id)?;
+            if let Err(error) = devices::remove(id) {
+                warning = Some(ui::sentence(&error));
+                continue;
+            }
             warning = reload_daemon().err();
         }
     }
@@ -1311,10 +1323,10 @@ fn choose_multi_device_auth(screen: &Screen) -> Action {
             .selected(current.unwrap_or(0))
             .run(screen)?
         else {
-            return Ok(false);
+            return Ok(());
         };
         if choice == back {
-            return Ok(false);
+            return Ok(());
         }
         let expression = match choice {
             0 => "any".to_string(),
@@ -1606,9 +1618,9 @@ fn live_status(screen: &Screen) -> Action {
         };
         screen.draw(&frame)?;
         for _ in 0..10 {
-            if reader.was_pressed() {
+            if reader.was_pressed() || interrupt::quit_requested() {
                 drop(reader);
-                return Ok(false);
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1662,8 +1674,9 @@ fn uninstall_report(screen: &Screen, steps: &[setup::Step]) -> Frame {
     frame
 }
 
-/// Returns true after complete removal so the caller exits the application.
-fn uninstall(screen: &Screen) -> Result<bool, String> {
+/// Only a completed uninstall exits; backing out and a failed uninstall stay
+/// in the menu so the user can retry or inspect the failure.
+fn uninstall(screen: &Screen) -> Result<Next, String> {
     let enrolled = enrolled_devices().len();
     let mut items = vec![
         "Uninstall, keep enrolled devices".to_string(),
@@ -1671,22 +1684,20 @@ fn uninstall(screen: &Screen) -> Result<bool, String> {
     ];
     items.push("Back".into());
     let back = items.len() - 1;
-
     let Some(choice) = Menu::new(uninstall_head(screen, enrolled), items)
         .selected(back)
         .run(screen)?
     else {
-        return Ok(false);
+        return Ok(Next::Stay);
     };
     if choice == back {
-        return Ok(false);
+        return Ok(Next::Stay);
     }
     let enrollment = if choice == 0 {
         setup::Enrollment::Keep
     } else {
         setup::Enrollment::Forget
     };
-
     screen.draw_above_output(&uninstall_head(screen, enrolled))?;
     let steps = setup::uninstall(enrollment);
     let complete = steps.iter().all(|step| step.ok);
@@ -1699,7 +1710,7 @@ fn uninstall(screen: &Screen) -> Result<bool, String> {
     });
     screen.draw(&report)?;
     ui::wait_for_dismiss(screen)?;
-    Ok(complete)
+    Ok(if complete { Next::Exit } else { Next::Stay })
 }
 
 /// The setup command owns the lock-screen integration: it is applied by the
@@ -1721,6 +1732,15 @@ const MAIN_MENU: [&str; 7] = [
 /// the terminal driver fails); an action that fails is reported and the menu
 /// keeps looping.
 pub fn run() -> Result<(), String> {
+    let stdin = stdin();
+    if !stdin.is_terminal() || !console::Term::stdout().is_term() {
+        return Err("the interactive menu needs a terminal".into());
+    }
+    let saved = tcgetattr(stdin.as_fd()).map_err(|error| error.to_string())?;
+    *STARTUP_TERMIOS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "cannot save terminal settings".to_string())? = Some(saved);
     // Registered first: the handler must exist before the buffer switch it
     // is responsible for undoing.
     interrupt::install(restore_terminal);
@@ -1751,11 +1771,11 @@ pub fn run() -> Result<(), String> {
             0 => enroll_menu(&screen),
             1 => manage_devices(&screen),
             2 => choose_multi_device_auth(&screen),
-            3 => diagnostics(&screen).map(|()| false),
+            3 => diagnostics(&screen),
             4 => live_status(&screen),
-            _ => match uninstall(&screen) {
-                Ok(true) => return Ok(()),
-                result => result,
+            _ => match uninstall(&screen)? {
+                Next::Exit => return Ok(()),
+                Next::Stay => Ok(()),
             },
         };
         // Ctrl+C during the action asked to leave, and the action has now
@@ -2042,7 +2062,7 @@ mod tests {
             ok: true,
         }));
         assert_eq!(
-            pair_cancelled_frame(&screen, &state, &Ok(())).plain(),
+            pair_cancelled_frame(&screen, &state, &Ok(true)).plain(),
             [
                 "Pairing cancelled",
                 "",
@@ -2078,7 +2098,8 @@ mod tests {
             id: "apple-watch".into(),
             name: None,
         });
-        let lines = pair_success_frame(&screen, enrollment::PROVIDERS[0], &state, &Ok(())).plain();
+        let lines =
+            pair_success_frame(&screen, enrollment::PROVIDERS[0], &state, &Ok(true)).plain();
         assert!(lines[0].starts_with("Apple Watch enrolled"));
         // Derived, not quoted: the screen must agree with the flow it belongs
         // to even after the flow gains a screen.

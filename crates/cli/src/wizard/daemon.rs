@@ -63,10 +63,10 @@ impl DaemonPause {
     }
 
     /// Ends the pause here rather than at the end of the caller's scope, and
-    /// reports whether the daemon came up — which the screen that follows has
-    /// to be able to state honestly.
-    pub(super) fn resume(self) -> Result<(), String> {
-        let restarted = restart_unlockd().map(|_| ());
+    /// reports whether the daemon was restarted. A false result means it was
+    /// inactive before the operation, so screens must not claim it resumed.
+    pub(super) fn resume(self) -> Result<bool, String> {
+        let restarted = restart_unlockd();
         // Explicit: the guard is spent, and the `Drop` it triggers finds the
         // flag already cleared rather than issuing a second restart.
         drop(self);

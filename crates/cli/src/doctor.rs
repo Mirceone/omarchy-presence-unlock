@@ -1,6 +1,9 @@
 //! Preflight checks. Every failure names the command that fixes it.
 
-use crate::client;
+use crate::{
+    client,
+    setup::{binding, lock, service},
+};
 use bluer::Session;
 use omarchy_presence_unlock_protocol::{
     config::ConfigFile,
@@ -15,12 +18,6 @@ use std::{
     time::Duration,
 };
 
-const STOCK_PLUGIN_ID: &str = "omarchy.lock";
-/// Written into the generated lock by `setup::lock`. Its absence means the
-/// enabled lock is not this integration, whatever else is in place.
-const PRESENCE_MARKER: &str = "// omarchy-presence-unlock:presence";
-const BINDING_MARKER: &str = "-- omarchy-presence-unlock:start";
-const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
 const ADAPTER_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct LockIntegration {
@@ -76,7 +73,51 @@ pub fn doctor() -> Result<(), String> {
 }
 
 fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
+    collect_integration(checks)?;
+    collect_enrollment(checks)
+}
+
+/// Everything that can be healthy before a device is enrolled.
+fn collect_integration(checks: &mut Vec<Check>) -> Result<(), String> {
+    let integration = lock_integration();
+    validate_lock(integration.as_ref())?;
+    let plugin_id = integration.map_or_else(
+        || lock::STOCK_PLUGIN_ID.to_string(),
+        |integration| integration.plugin_id,
+    );
+    pass(
+        checks,
+        format!(
+            "presence lock {plugin_id}, cloned from {}",
+            lock::STOCK_PLUGIN_ID
+        ),
+    );
+    pass(checks, "Alt hold/release binding".to_string());
+    service::policy_installed()?;
+    pass(
+        checks,
+        format!("presence PAM policy {}", service::PAM_POLICY),
+    );
+    validate_service_unit()?;
+    pass(
+        checks,
+        format!(
+            "presence service path enabled (service {})",
+            user_service_state()
+        ),
+    );
+    Ok(())
+}
+
+/// The configuration and the daemon serving it.
+fn collect_enrollment(checks: &mut Vec<Check>) -> Result<(), String> {
     let path = config_path().ok_or("XDG_CONFIG_HOME or HOME is required")?;
+    if !path.exists() {
+        return Err(
+            "no devices enrolled yet; run `omarchy-presence-unlock` and choose Enroll a device"
+                .into(),
+        );
+    }
     let config = ConfigFile::from_path(&path).map_err(|error| error.to_string())?;
     let settings = config.resolve().map_err(|error| error.to_string())?;
 
@@ -103,19 +144,6 @@ fn collect(checks: &mut Vec<Check>) -> Result<(), String> {
 
     let adapter_name = adapter_is_usable(config.adapter.as_deref())?;
     pass(checks, format!("Bluetooth adapter {adapter_name} powered"));
-
-    let integration = lock_integration();
-    validate_lock(integration.as_ref())?;
-    let plugin_id = integration.map_or_else(
-        || STOCK_PLUGIN_ID.to_string(),
-        |integration| integration.plugin_id,
-    );
-    pass(
-        checks,
-        format!("presence lock {plugin_id}, cloned from {STOCK_PLUGIN_ID}"),
-    );
-    pass(checks, "Alt hold/release binding".to_string());
-    pass(checks, format!("presence PAM policy {PAM_POLICY}"));
 
     let socket = current_socket_path();
     let metadata = fs::metadata(&socket).map_err(|_| {
@@ -201,7 +229,7 @@ fn validate_lock(integration: Option<&LockIntegration>) -> Result<(), String> {
         // Both halves are generated: the service authenticates, the view is
         // what tells the user the gesture exists. One without the other is a
         // stale clone from a partial install or an interrupted update.
-        if !contents.contains(PRESENCE_MARKER) {
+        if !contents.contains(lock::PRESENCE_MARKER) {
             return Err(format!(
                 "{} carries no presence code; rerun `omarchy-presence-unlock setup`",
                 asset.display()
@@ -216,7 +244,7 @@ fn validate_lock(integration: Option<&LockIntegration>) -> Result<(), String> {
         )
     })?;
     for required in [
-        BINDING_MARKER,
+        binding::BLOCK_START,
         "ALT_L",
         "ALT_R",
         "presence-unlock hold",
@@ -233,11 +261,6 @@ fn validate_lock(integration: Option<&LockIntegration>) -> Result<(), String> {
         }
     }
 
-    if !std::path::Path::new(PAM_POLICY).is_file() {
-        return Err(format!(
-            "presence PAM policy is missing at {PAM_POLICY}; rerun `omarchy-presence-unlock setup`"
-        ));
-    }
     if !plugin_is_enabled(plugin_id) {
         return Err(format!(
             "the presence lock {plugin_id} is not enabled; run `omarchy plugin enable {plugin_id}`"
@@ -246,9 +269,10 @@ fn validate_lock(integration: Option<&LockIntegration>) -> Result<(), String> {
     // The clone replaces the built-in, so the shell reports the built-in as
     // disabled. Both enabled at once would mean the clone is not registered
     // as its replacement, and the wrong lock could answer.
-    if plugin_is_enabled(STOCK_PLUGIN_ID) {
+    if plugin_is_enabled(lock::STOCK_PLUGIN_ID) {
         return Err(format!(
-            "both {plugin_id} and {STOCK_PLUGIN_ID} are enabled; rerun `omarchy-presence-unlock setup`"
+            "both {plugin_id} and {} are enabled; rerun `omarchy-presence-unlock setup`",
+            lock::STOCK_PLUGIN_ID
         ));
     }
     if !presence_responds() {
@@ -332,6 +356,23 @@ fn adapter_is_usable(adapter_name: Option<&str>) -> Result<String, String> {
     .map_err(|_| "BlueZ adapter query thread panicked".to_string())?
 }
 
+/// Verifies the user unit that can be healthy before any device is enrolled.
+fn validate_service_unit() -> Result<(), String> {
+    let output = Command::new("systemctl")
+        .args(["--user", "is-enabled", "presenced.path"])
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot query the presence service path: {error}; run `omarchy-presence-unlock setup`"
+            )
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("the presence service path is not enabled; run `omarchy-presence-unlock setup`".into())
+    }
+}
+
 fn user_service_state() -> String {
     Command::new("systemctl")
         .args(["--user", "is-active", "presenced.service"])
@@ -352,7 +393,7 @@ mod tests {
         let listing =
             br#"[{"id":"tester.lock","enabled":true},{"id":"omarchy.lock","enabled":false}]"#;
         assert!(plugin_enabled_in(listing, "tester.lock"));
-        assert!(!plugin_enabled_in(listing, STOCK_PLUGIN_ID));
+        assert!(!plugin_enabled_in(listing, lock::STOCK_PLUGIN_ID));
         assert!(!plugin_enabled_in(listing, "bob.lock"));
     }
 

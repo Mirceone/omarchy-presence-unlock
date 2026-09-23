@@ -43,8 +43,8 @@ pub async fn scan(adapter_name: Option<&str>, service: Arc<Service>) -> Result<(
     // Fixed for the lifetime of the scan: the fleet is immutable after startup,
     // so the per-advertisement D-Bus reads are decided once, here.
     let needs = service.fleet.lock().await.needs();
-    // With duplicate_data, BlueZ re-signals ManufacturerData per advertisement, so
-    // discover_devices_with_changes yields one DeviceAdded per advertisement.
+    // bluer replays known devices first and re-emits them on property changes;
+    // presence policy's duplicate filter handles those repeats.
     // Devices that match no configured identity cost no D-Bus traffic: the first
     // filter is arithmetic on the address already carried by the event.
     let mut events = std::pin::pin!(adapter.discover_devices_with_changes().await?);

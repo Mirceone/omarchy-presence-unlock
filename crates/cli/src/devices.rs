@@ -1,6 +1,6 @@
 //! Enrollment: comment-preserving edits to the `[[device]]` array in config.toml.
 
-use crate::atomic::write_atomic;
+use crate::atomic::update_atomic;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use omarchy_presence_unlock_protocol::{
     ble::parse_address,
@@ -193,40 +193,44 @@ fn config_path() -> Result<PathBuf, String> {
     paths::config_path().ok_or_else(|| "XDG_CONFIG_HOME or HOME is required".to_string())
 }
 
-/// Reads `config.toml` for editing, or starts a fresh current-schema document.
-fn open() -> Result<DocumentMut, String> {
-    let path = config_path()?;
-    if !path.exists() {
-        let mut document = DocumentMut::new();
-        document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
-        return Ok(document);
-    }
-    fs::read_to_string(&path)
-        .map_err(|error| error.to_string())?
+/// Parses the source under the config lock, supplying an empty current-schema
+/// document for a first enrollment.
+fn document(source: &str, path: &std::path::Path) -> Result<DocumentMut, String> {
+    source
         .parse::<DocumentMut>()
         .map_err(|error| format!("cannot edit {}: {error}", path.display()))
 }
 
-/// Writes config.toml 0600 through a temp file, after checking it still resolves.
-fn save(document: &DocumentMut) -> Result<(), String> {
-    let text = document.to_string();
-    ConfigFile::parse(&text)
-        .map_err(|error| format!("refusing to write an unusable config: {error}"))?
-        .resolve()
-        .map_err(|error| format!("refusing to write an unusable config: {error}"))?;
-    write_config(document)
+fn empty_document() -> String {
+    let mut document = DocumentMut::new();
+    document["schema_version"] = value(i64::from(CURRENT_SCHEMA));
+    document.to_string()
 }
 
-/// Writes config.toml 0600 through a temp file inside a 0700 directory.
-///
-/// Separate from [`save`] for the one caller that legitimately writes a config
-/// with nothing enrolled, which cannot resolve by design.
-fn write_config(document: &DocumentMut) -> Result<(), String> {
+/// Serializes every config edit with other CLI writers and validates the
+/// finished document before it can replace a working configuration.
+fn update_config(
+    allow_empty: bool,
+    edit: impl FnOnce(&mut DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
+    let path = config_path()?;
     let directory = paths::config_dir().ok_or("XDG_CONFIG_HOME or HOME is required")?;
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
-    write_atomic(&config_path()?, &document.to_string(), 0o600)
+        .map_err(|error| error.to_string())?;
+    let missing = empty_document();
+    update_atomic(&path, &missing, 0o600, |source| {
+        let mut document = document(source, &path)?;
+        edit(&mut document)?;
+        let text = document.to_string();
+        if !allow_empty {
+            ConfigFile::parse(&text)
+                .map_err(|error| format!("refusing to write an unusable config: {error}"))?
+                .resolve()
+                .map_err(|error| format!("refusing to write an unusable config: {error}"))?;
+        }
+        Ok(text)
+    })
 }
 
 /// Criteria keys `apply_device` owns; cleared on every update so a re-enrollment
@@ -344,9 +348,9 @@ pub fn add(
     criteria: &Criteria,
     overrides: &Overrides,
 ) -> Result<(), String> {
-    let mut document = open()?;
-    apply_device(&mut document, id, profile, criteria, overrides)?;
-    save(&document)
+    update_config(false, |document| {
+        apply_device(document, id, profile, criteria, overrides)
+    })
 }
 
 /// Retunes how close one enrolled device must be, leaving everything else
@@ -361,14 +365,15 @@ pub fn add(
 /// Returns an error when no such device is configured, or when the result
 /// would not resolve.
 pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
-    let mut document = open()?;
-    let devices = device_array(&mut document)?;
-    let table = devices
-        .iter_mut()
-        .find(|table| table.get("id").and_then(Item::as_str) == Some(id))
-        .ok_or_else(|| format!("no device named {id} is configured"))?;
-    table["threshold_dbm"] = value(i64::from(threshold_dbm));
-    save(&document)
+    update_config(false, |document| {
+        let devices = device_array(document)?;
+        let table = devices
+            .iter_mut()
+            .find(|table| table.get("id").and_then(Item::as_str) == Some(id))
+            .ok_or_else(|| format!("no device named {id} is configured"))?;
+        table["threshold_dbm"] = value(i64::from(threshold_dbm));
+        Ok(())
+    })
 }
 
 /// Removes one device by id.
@@ -377,25 +382,30 @@ pub fn set_threshold(id: &str, threshold_dbm: i16) -> Result<(), String> {
 ///
 /// Returns an error when no such device is configured, or when the write fails.
 pub fn remove(id: &str) -> Result<(), String> {
-    let mut document = open()?;
-    if document.get("device").is_none() {
-        return Err(format!("no device named {id} is configured"));
-    }
-    let devices = device_array(&mut document)?;
-    let before = devices.len();
-    devices.retain(|table| table.get("id").and_then(Item::as_str) != Some(id));
-    if devices.len() == before {
-        return Err(format!("no device named {id} is configured"));
-    }
-    // Removing the last device empties the array, which does not resolve: the
-    // daemon requires at least one. Refusing the write would trap a user with
-    // one enrolled device — a lost phone is exactly when revoking matters —
-    // so an empty config is written directly as the valid "nothing enrolled"
-    // state the daemon and diagnostics already report.
-    if devices.is_empty() {
-        return write_config(&document);
-    }
-    save(&document)
+    update_config(true, |document| {
+        if document.get("device").is_none() {
+            return Err(format!("no device named {id} is configured"));
+        }
+        let empty = {
+            let devices = device_array(document)?;
+            let before = devices.len();
+            devices.retain(|table| table.get("id").and_then(Item::as_str) != Some(id));
+            if devices.len() == before {
+                return Err(format!("no device named {id} is configured"));
+            }
+            devices.is_empty()
+        };
+        // Removing the last device empties the array, which does not resolve:
+        // a lost phone is exactly when revoking matters. The empty document is
+        // the valid "nothing enrolled" state the daemon and diagnostics report.
+        if !empty {
+            ConfigFile::parse(&document.to_string())
+                .map_err(|error| format!("refusing to write an unusable config: {error}"))?
+                .resolve()
+                .map_err(|error| format!("refusing to write an unusable config: {error}"))?;
+        }
+        Ok(())
+    })
 }
 
 /// Sets how many enrolled devices must authorize an unlock.
@@ -404,9 +414,10 @@ pub fn remove(id: &str) -> Result<(), String> {
 ///
 /// Returns an error for a rule this build does not understand.
 pub fn set_multi_device_auth(expression: &str) -> Result<(), String> {
-    let mut document = open()?;
-    document["multi_device_auth"] = value(expression);
-    save(&document)
+    update_config(false, |document| {
+        document["multi_device_auth"] = value(expression);
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -8,11 +8,11 @@
 //! gesture, [`menu`] the Omarchy menu row, [`service`] the daemon's units and
 //! the PAM policy they answer for, and [`paths`] the locations they share.
 
-mod binding;
-mod lock;
+pub(crate) mod binding;
+pub(crate) mod lock;
 mod menu;
 mod paths;
-mod service;
+pub(crate) mod service;
 mod teardown;
 
 pub use teardown::{Enrollment, Step, uninstall};
@@ -71,8 +71,10 @@ pub fn apply() -> Result<(), String> {
         });
     }
 
-    // After enabling, so a first install does not restart a shell that is
-    // about to load the plugin anyway.
+    // Restart even on a first install: the installer's replacement flow is
+    // uninstall-then-setup under the same plugin id, and the shell keeps a
+    // `keepLoaded` lock instance across rescans. A redundant restart is cheap;
+    // a lock screen running the previous code is not.
     if let Err(error) = lock::reload_code(&clone) {
         eprintln!("warning: could not reload the Omarchy shell: {error}");
     }

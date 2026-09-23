@@ -24,12 +24,12 @@ use std::{
 
 /// The built-in this clone replaces. Recorded as `clonedFrom` so the shell
 /// routes the `lock` IPC target here and restores the built-in on removal.
-pub(super) const STOCK_PLUGIN_ID: &str = "omarchy.lock";
+pub(crate) const STOCK_PLUGIN_ID: &str = "omarchy.lock";
 
 /// Marks generated code inside the clone. Setup rewrites the clone from stock
 /// every run, so this is what tells `doctor` that the enabled lock is the
 /// presence one rather than an untouched or hand-made clone.
-pub(super) const PRESENCE_MARKER: &str = "// omarchy-presence-unlock:presence";
+pub(crate) const PRESENCE_MARKER: &str = "// omarchy-presence-unlock:presence";
 
 /// Files copied out of the stock lock. Everything else it ships comes along
 /// verbatim; these three are the ones this module rewrites.
@@ -152,9 +152,8 @@ const SERVICE_STATE_PATCH: &str = r#"  property bool strandedLockResolved: false
     onFileChanged: reload()
   }
 
-  // The Alt binding's two edges. There is deliberately no method that
-  // authenticates without the hold: the gesture is the user's intent, and
-  // this target is reachable by anything in the session.
+  // The Alt hold is a user-intent gesture, not a boundary against same-session
+  // processes: anything running as this user can call hold().
   IpcHandler {
     target: "presence-unlock"
 
@@ -517,8 +516,8 @@ pub(super) fn reload_code(clone: &Clone) -> Result<(), String> {
         return Ok(());
     }
     super::run(Command::new("omarchy").args(["restart", "shell"]))?;
-    fs::create_dir_all(stamp.parent().ok_or("invalid state path")?)
-        .map_err(|error| error.to_string())?;
+    let stamp_dir = stamp.parent().ok_or("invalid state path")?;
+    fs::create_dir_all(stamp_dir).map_err(|error| error.to_string())?;
     write_atomic(&stamp, &format!("{applied}\n"), 0o644)
 }
 

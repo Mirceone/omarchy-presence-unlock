@@ -1,14 +1,7 @@
 //! Worker coordination for screens that keep painting while an operation runs.
 
 use crate::{interrupt, keys};
-use nix::{
-    poll::{PollFd, PollFlags, PollTimeout, poll},
-    sys::termios::{SetArg, SpecialCharacterIndices, Termios, cfmakeraw, tcgetattr, tcsetattr},
-    unistd::read,
-};
 use std::{
-    io::{IsTerminal, stdin},
-    os::fd::{AsFd, AsRawFd, BorrowedFd},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
@@ -59,7 +52,7 @@ pub(super) fn run_cancellable<T: Send + 'static>(
             // Leaving still unwinds the operation first: it owns adapter
             // state that only its own cleanup puts back.
             keys::Press::Quit => interrupt::request_quit(),
-            keys::Press::Idle => {}
+            keys::Press::Idle | keys::Press::Pressed => {}
         }
         // Covers a SIGINT that landed between polls, when the terminal was
         // not raw and Ctrl+C was a signal rather than a byte.
@@ -83,32 +76,6 @@ pub(super) fn run_cancellable<T: Send + 'static>(
     )
 }
 
-/// Reinstates the input settings before the screen can release its reader.
-struct RawMode<'fd> {
-    fd: BorrowedFd<'fd>,
-    saved: Termios,
-}
-
-impl<'fd> RawMode<'fd> {
-    fn enter(fd: BorrowedFd<'fd>) -> Option<Self> {
-        let saved = tcgetattr(fd).ok()?;
-        let mut raw = saved.clone();
-        cfmakeraw(&mut raw);
-        // The screen continues painting while input is raw.
-        raw.output_flags = saved.output_flags;
-        raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 0;
-        raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
-        tcsetattr(fd, SetArg::TCSANOW, &raw).ok()?;
-        Some(Self { fd, saved })
-    }
-}
-
-impl Drop for RawMode<'_> {
-    fn drop(&mut self) {
-        let _ = tcsetattr(self.fd, SetArg::TCSANOW, &self.saved);
-    }
-}
-
 /// Owns the status screen's reader until the screen has definitely released
 /// stdin. Its polling interval bounds `Drop`, so every exit path joins it.
 pub(super) struct LiveStatusReader {
@@ -119,7 +86,14 @@ pub(super) struct LiveStatusReader {
 
 impl LiveStatusReader {
     pub(super) fn start() -> Self {
-        Self::start_with_poller(|_| poll_for_key())
+        Self::start_with_poller(|_| match keys::wait_for_press(Duration::from_millis(100)) {
+            keys::Press::Quit => {
+                interrupt::request_quit();
+                true
+            }
+            keys::Press::Idle => false,
+            keys::Press::Pressed | keys::Press::Cancel => true,
+        })
     }
 
     fn start_with_poller(poll: impl Fn(&AtomicBool) -> bool + Send + 'static) -> Self {
@@ -152,36 +126,6 @@ impl Drop for LiveStatusReader {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-    }
-}
-
-/// Reads only after `poll` says a byte is ready, so a cancelled status screen
-/// never leaves a blocking read behind.
-fn poll_for_key() -> bool {
-    let stdin = stdin();
-    if !stdin.is_terminal() {
-        return false;
-    }
-    let fd = stdin.as_fd();
-    let Some(_raw) = RawMode::enter(fd) else {
-        return false;
-    };
-    let mut fds = [PollFd::new(fd, PollFlags::POLLIN)];
-    let timeout = PollTimeout::try_from(Duration::from_millis(100)).unwrap_or(PollTimeout::MAX);
-    match poll(&mut fds, timeout) {
-        Ok(1..) => {
-            let mut byte = [0];
-            match read(fd.as_raw_fd(), &mut byte) {
-                Ok(1) if byte[0] == 0x03 => {
-                    interrupt::request_quit();
-                    true
-                }
-                Ok(1..) => true,
-                _ => false,
-            }
-        }
-        // Nothing ready, or a signal cut the wait short: the caller polls again.
-        _ => false,
     }
 }
 

@@ -68,6 +68,7 @@ impl Mark {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
     width: usize,
+    rows: usize,
     lines: Vec<String>,
     /// One-based row and column for the terminal cursor. Absent means the
     /// screen takes no typing and the cursor stays hidden.
@@ -76,9 +77,10 @@ pub struct Frame {
 
 impl Frame {
     #[must_use]
-    fn new(width: usize) -> Self {
+    fn new(width: usize, rows: usize) -> Self {
         Self {
             width,
+            rows,
             lines: Vec::new(),
             cursor: None,
         }
@@ -168,7 +170,8 @@ impl Screen {
     /// between screens is picked up without any resize plumbing.
     #[must_use]
     pub fn frame(&self) -> Frame {
-        Frame::new(self.term.size().1 as usize)
+        let (rows, width) = self.term.size();
+        Frame::new(width as usize, rows as usize)
     }
 
     /// The exact sequence a frame paints as.
@@ -195,13 +198,17 @@ impl Screen {
         let mut out = String::with_capacity(1024);
         out.push_str(HIDE_CURSOR);
         out.push_str(HOME);
-        for line in &frame.lines {
+        let lines = frame.lines.iter().take(frame.rows);
+        let count = lines.len();
+        for (index, line) in lines.enumerate() {
             out.push_str(CLEAR_LINE);
             out.push_str(&console::truncate_str(line, frame.width, ""));
-            out.push('\n');
+            if index + 1 < count {
+                out.push('\n');
+            }
         }
         out.push_str(CLEAR_BELOW);
-        if let Some((row, column)) = frame.cursor {
+        if let Some((row, column)) = frame.cursor.filter(|(row, _)| *row <= count) {
             let _ = write!(out, "\x1b[{row};{column}H{SHOW_CURSOR}");
         }
         out
@@ -209,10 +216,10 @@ impl Screen {
 
     /// Paints a frame from the top-left corner.
     ///
-    /// # Errors
-    ///
-    /// Returns an error when the terminal cannot be written to.
     pub fn draw(&self, frame: &Frame) -> Result<(), String> {
+        if interrupt::quit_requested() {
+            return Ok(());
+        }
         self.term
             .write_str(&Self::paint(frame))
             .and_then(|()| self.term.flush())
@@ -320,7 +327,15 @@ impl<'a> Menu<'a> {
     fn render(&self) -> Frame {
         let mut frame = self.head.clone();
         frame.blank();
-        for (index, item) in self.items.iter().enumerate() {
+        // Reserve the footer before choosing the visible window. The selected
+        // row stays in that window even when a compact terminal cannot show
+        // the entire list.
+        let capacity = frame.rows.saturating_sub(frame.lines.len() + 2).max(1);
+        let first = self
+            .selected
+            .saturating_sub(capacity.saturating_sub(1))
+            .min(self.items.len().saturating_sub(capacity));
+        for (index, item) in self.items.iter().enumerate().skip(first).take(capacity) {
             if index == self.selected {
                 frame.line(format!("  {} {}", style("→").green(), style(item).green()));
             } else {
@@ -443,7 +458,7 @@ mod tests {
 
     #[test]
     fn the_step_indicator_is_pushed_to_the_right_margin() {
-        let mut frame = Frame::new(40);
+        let mut frame = Frame::new(40, 24);
         frame.title("Pair Apple Watch", Some("Step 1 of 3"));
         let rendered = console::strip_ansi_codes(&frame.lines[0]).to_string();
         assert_eq!(rendered.chars().count(), 40);
@@ -453,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_title_wider_than_the_terminal_still_keeps_the_two_apart() {
-        let mut frame = Frame::new(10);
+        let mut frame = Frame::new(10, 24);
         frame.title("Pair Apple Watch", Some("Step 1 of 3"));
         let rendered = console::strip_ansi_codes(&frame.lines[0]).to_string();
         assert_eq!(rendered, "Pair Apple Watch  Step 1 of 3");
@@ -465,7 +480,7 @@ mod tests {
     /// the character there — which is how the step indicator lost its total.
     #[test]
     fn a_full_width_line_keeps_its_last_character_when_painted() {
-        let mut frame = Frame::new(40);
+        let mut frame = Frame::new(40, 24);
         frame.title("Pair Apple Watch", Some("Step 1 of 3"));
         let painted = console::strip_ansi_codes(&Screen::paint(&frame)).to_string();
         assert!(painted.contains("Step 1 of 3"));
@@ -490,7 +505,7 @@ mod tests {
     /// below it.
     #[test]
     fn painting_clips_styled_lines_without_leaking_the_style() {
-        let mut frame = Frame::new(5);
+        let mut frame = Frame::new(5, 24);
         frame.line("\x1b[32m123456789\x1b[0m");
         frame.line("plain");
 

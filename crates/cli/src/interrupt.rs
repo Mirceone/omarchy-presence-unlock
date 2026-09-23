@@ -26,6 +26,8 @@ use tokio::signal::unix::{SignalKind, signal};
 /// as well as the `SignalKind`s.
 const SIGINT: i32 = nix::libc::SIGINT;
 const SIGTERM: i32 = nix::libc::SIGTERM;
+const SIGHUP: i32 = nix::libc::SIGHUP;
+const SIGQUIT: i32 = nix::libc::SIGQUIT;
 
 /// Set once the user has asked to leave. Long operations poll it and unwind;
 /// doubling as the `cancel` flag the non-interactive CLI hands to enrollment,
@@ -55,6 +57,7 @@ pub fn quit_requested() -> bool {
 }
 
 fn force_quit(signum: i32) -> ! {
+    QUIT_REQUESTED.store(true, Ordering::Relaxed);
     if let Some(on_quit) = ON_QUIT.get() {
         on_quit();
     }
@@ -77,9 +80,9 @@ pub fn exit_if_interrupted(error: &std::io::Error) {
     }
 }
 
-/// Installs the SIGINT and SIGTERM handlers. `on_quit` runs immediately
-/// before an exit that skips destructors, for callers that must put the
-/// terminal back or restore a service they suspended.
+/// Installs handlers for signals that can end the terminal session. `on_quit`
+/// runs immediately before an exit that skips destructors, for callers that
+/// must put the terminal back or restore a service they suspended.
 ///
 /// `console` does not hand Ctrl+C back as a key: it re-raises SIGINT at the
 /// process, and the default disposition kills us outright without unwinding.
@@ -87,8 +90,8 @@ pub fn exit_if_interrupted(error: &std::io::Error) {
 /// directly, but `tokio`'s signal driver is already a dependency and does it
 /// in safe code.
 ///
-/// SIGTERM never asks, it only tells: a logout or a `kill` has no interactive
-/// user to hand a half-finished operation back to.
+/// SIGTERM, SIGHUP, and SIGQUIT never ask: a logout, terminal close, or
+/// Ctrl+\ has no interactive user to hand a half-finished operation back to.
 ///
 /// Returns only once the handlers are installed. `signal()` registers with
 /// the OS when the stream is built rather than when it is first awaited, so
@@ -108,9 +111,11 @@ pub fn install(on_quit: fn()) {
             return;
         };
         runtime.block_on(async move {
-            let (Ok(mut interrupt), Ok(mut terminate)) = (
+            let (Ok(mut interrupt), Ok(mut terminate), Ok(mut hangup), Ok(mut quit)) = (
                 signal(SignalKind::interrupt()),
                 signal(SignalKind::terminate()),
+                signal(SignalKind::hangup()),
+                signal(SignalKind::quit()),
             ) else {
                 drop(registered);
                 return;
@@ -126,6 +131,14 @@ pub fn install(on_quit: fn()) {
                     },
                     received = terminate.recv() => match received {
                         Some(()) => force_quit(SIGTERM),
+                        None => break,
+                    },
+                    received = hangup.recv() => match received {
+                        Some(()) => force_quit(SIGHUP),
+                        None => break,
+                    },
+                    received = quit.recv() => match received {
+                        Some(()) => force_quit(SIGQUIT),
                         None => break,
                     },
                 }

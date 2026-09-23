@@ -930,6 +930,7 @@ async fn active_capture(
     name: &str,
     timeout_secs: u64,
     capture: &Capture<'_>,
+    saved: &AtomicBool,
 ) -> Result<(), String> {
     let progress = capture.progress;
     let adapter_index = adapter
@@ -973,37 +974,36 @@ async fn active_capture(
     progress(Progress::Phase(Phase::Connected(reported_name(
         device.alias().await.ok(),
     ))));
-    let result = async {
-        initiate_security(&device).await?;
-        progress(Progress::Phase(Phase::Bonded));
-        let captured =
-            tokio::time::timeout(IRK_WAIT, capture_peer_irk(&mut monitor, &device, observed))
-                .await
-                .map_err(|_| {
-                    "bonding completed, but the kernel produced no remote IRK for this device"
-                        .to_string()
-                })??;
-        // Proves the key resolves the address this peer was actually using,
-        // which no self-consistent event can fake.
-        self_check(&captured.key, observed)?;
-        progress(Progress::Phase(Phase::IdentityReceived));
-        let peer_name = resolve_peer_name(&device).await;
-        let named = peer_name.clone();
-        save_capture(
-            &captured,
-            capture.profile,
-            capture.id,
-            peer_name.as_deref().or(Some(capture.fallback)),
-            named,
-            capture.save,
-            progress,
-        )?;
-        progress(Progress::Phase(Phase::Verified));
-        Ok(())
-    }
-    .await;
-    cleanup_capture_device(adapter, &device, observed, progress).await;
-    result
+    initiate_security(&device).await?;
+    progress(Progress::Phase(Phase::Bonded));
+    let captured =
+        tokio::time::timeout(IRK_WAIT, capture_peer_irk(&mut monitor, &device, observed))
+            .await
+            .map_err(|_| {
+                "bonding completed, but the kernel produced no remote IRK for this device"
+                    .to_string()
+            })??;
+    // Proves the key resolves the address this peer was actually using, which
+    // no self-consistent event can fake.
+    self_check(&captured.key, observed)?;
+    progress(Progress::Phase(Phase::IdentityReceived));
+    let peer_name = resolve_peer_name(&device).await;
+    let named = peer_name.clone();
+    save_capture(
+        &captured,
+        capture.profile,
+        capture.id,
+        peer_name.as_deref().or(Some(capture.fallback)),
+        named,
+        capture.save,
+        progress,
+    )?;
+    // `save_capture` has synchronously committed the enrollment. From here a
+    // cancel only shortens cleanup; it cannot truthfully turn success into
+    // "cancelled".
+    saved.store(true, Ordering::Relaxed);
+    progress(Progress::Phase(Phase::Verified));
+    Ok(())
 }
 
 /// Undoes what the capture flow left behind when it is cancelled part-way.
@@ -1105,6 +1105,7 @@ async fn advertise_flow(
         progress,
     };
 
+    let saved = AtomicBool::new(false);
     let result = tokio::select! {
         result = active_capture(
             &session,
@@ -1113,24 +1114,25 @@ async fn advertise_flow(
             &name,
             timeout_secs,
             &capture,
+            &saved,
         ) => result,
         () = cancelled(cancel) => Err("cancelled".to_string()),
     };
-    // Any exit that is not a completed enrollment may still have left a bond,
-    // and an abandoned bond holds keys. The timeout path is the reachable one:
-    // a peer that connects and bonds inside one poll interval is never claimed
-    // by `await_incoming_connection`, so the flow waits out its budget while
-    // BlueZ keeps the record.
-    if result.is_err() {
-        cleanup_new_capture_devices(&adapter, &established, progress).await;
-    }
+    // Saving is synchronous, so observing this flag means the enrollment was
+    // committed before cancellation could win a later poll. Cleanup runs only
+    // after the select, keeping that committed result independent of Esc.
+    let enrolled = saved.load(Ordering::Relaxed);
+    // Any exit may have left a temporary bond. This includes success because
+    // the IRK enrollment must not leave BlueZ resolving the peer to its
+    // identity address.
+    cleanup_new_capture_devices(&adapter, &established, progress).await;
     progress(Progress::Cleanup(Cleanup {
         label: "Adapter settings restored",
         ok: restore_pairability(&adapter, previous_pairable, previous_timeout)
             .await
             .is_ok(),
     }));
-    result
+    if enrolled { Ok(()) } else { result }
 }
 
 /// Enrolls whatever peripheral bonds with this computer, under `profile`.

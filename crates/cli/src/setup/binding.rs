@@ -10,7 +10,7 @@ use super::paths;
 use crate::atomic::update_atomic;
 use std::process::Command;
 
-pub(super) const BLOCK_START: &str = "-- omarchy-presence-unlock:start";
+pub(crate) const BLOCK_START: &str = "-- omarchy-presence-unlock:start";
 pub(super) const BLOCK_END: &str = "-- omarchy-presence-unlock:end";
 // The press edge ignores mods because Hyprland has not yet folded Alt into the
 // modmask at Alt's own press. The release edge needs the target modmask plus

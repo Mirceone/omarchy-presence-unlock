@@ -47,7 +47,7 @@ fi
 
 # pacman and makepkg are guaranteed rather than assumed: this depends on the
 # omarchy package, which exists only on Arch.
-for command in cargo git makepkg pacman sudo realpath; do
+for command in cargo git makepkg pacman sudo realpath mktemp; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
@@ -86,6 +86,21 @@ installed_files=(
   /usr/share/omarchy-presence-unlock/plugin/Service.qml
   /usr/share/doc/omarchy-presence-unlock/README.md
   /usr/share/licenses/omarchy-presence-unlock/LICENSE
+  /usr/bin/omarchy-watch-unlock
+  /usr/bin/omarchy-watch-unlockd
+  /usr/lib/security/pam_omarchy_watch_unlock.so
+  /usr/lib/systemd/user/omarchy-watch-unlockd.service
+  /usr/share/omarchy-watch-unlock/omarchy-lock-watch.pam
+)
+
+# This predates the presence-unlock binary and has no `uninstall` subcommand,
+# so deleting its files blindly would also bypass the user's per-user cleanup.
+legacy_watch_files=(
+  /usr/bin/omarchy-watch-unlock
+  /usr/bin/omarchy-watch-unlockd
+  /usr/lib/security/pam_omarchy_watch_unlock.so
+  /usr/lib/systemd/user/omarchy-watch-unlockd.service
+  /usr/share/omarchy-watch-unlock/omarchy-lock-watch.pam
 )
 
 check_ownership() {
@@ -112,6 +127,13 @@ for path in "${installed_files[@]}"; do
   fi
 done
 check_ownership
+
+for path in "${legacy_watch_files[@]}"; do
+  if [[ -e $path || -L $path ]]; then
+    die "legacy omarchy-watch-unlock files have no supported automatic migration; disable omarchy-watch-unlockd.service and remove these files manually:
+${legacy_watch_files[*]}"
+  fi
+done
 
 # A second copy earlier on PATH would still open the old app after replacement.
 # Do not delete arbitrary executables outside the historical install locations.
@@ -147,7 +169,17 @@ if $replace; then
 fi
 
 printf 'Building the package...\n'
-cd packaging/local
+BUILD_DIR=$(mktemp -d)
+cleanup_build() {
+  rm -rf -- "$BUILD_DIR"
+}
+trap cleanup_build EXIT
+cp -- packaging/local/PKGBUILD "$BUILD_DIR/PKGBUILD"
+cp -- packaging/omarchy-presence-unlock.install "$BUILD_DIR/omarchy-presence-unlock.install"
+export OPU_SOURCE_DIR=$PROJECT_DIR
+# makepkg resolves install= relative to the recipe; the copy sits beside it.
+export OPU_INSTALL_FILE=omarchy-presence-unlock.install
+cd "$BUILD_DIR"
 makepkg --force --cleanbuild
 package_list=$(makepkg --packagelist)
 mapfile -t package_files <<<"$package_list"
@@ -176,7 +208,7 @@ if $replace; then
     printf 'install: the previous installation was removed, but the replacement was not installed.\n' >&2
     printf 'install: finish with: sudo pacman -U %s\n' "$keep/${package_file##*/}" >&2
   }
-  trap report_missing_package EXIT
+  trap 'report_missing_package; cleanup_build' EXIT
   printf 'Removing the existing installation, keeping enrolled devices...\n'
   /usr/bin/omarchy-presence-unlock uninstall \
     || die "existing installation cleanup failed; replacement was not installed"
@@ -200,6 +232,7 @@ fi
 printf 'Installing %s...\n' "$(basename "$package_file")"
 sudo pacman --upgrade --noconfirm "$package_file"
 trap - EXIT
+cleanup_build
 
 [[ -x /usr/bin/omarchy-presence-unlock ]] \
   || die "the package installed, but its executable is missing"

@@ -4,7 +4,7 @@ use super::paths;
 use omarchy_presence_unlock_protocol::paths as protocol_paths;
 use std::{path::Path, process::Command};
 
-pub(super) const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
+pub(crate) const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
 
 /// Whether the system half of the install is present.
 ///
@@ -15,7 +15,7 @@ pub(super) const PAM_POLICY: &str = "/etc/pam.d/omarchy-lock-presence";
 /// # Errors
 ///
 /// Returns an error naming the policy when it is absent.
-pub(super) fn policy_installed() -> Result<(), String> {
+pub(crate) fn policy_installed() -> Result<(), String> {
     if Path::new(PAM_POLICY).is_file() {
         return Ok(());
     }

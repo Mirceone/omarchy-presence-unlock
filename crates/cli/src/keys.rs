@@ -110,6 +110,8 @@ fn verdict(chunk: &[u8]) -> Verdict {
 pub enum Press {
     /// Nothing worth acting on arrived.
     Idle,
+    /// A key other than Esc or Ctrl+C arrived.
+    Pressed,
     /// Esc: stop this operation and stay in the app.
     Cancel,
     /// Ctrl+C: stop this operation, then leave the app.
@@ -163,7 +165,7 @@ pub fn wait_for_press(timeout: Duration) -> Press {
         match verdict(&buf[..held + count]) {
             Verdict::Cancel => return Press::Cancel,
             Verdict::Quit => return Press::Quit,
-            Verdict::Idle => held = 0,
+            Verdict::Idle => return Press::Pressed,
             Verdict::Undecided => {
                 buf[0] = ESC;
                 held = 1;

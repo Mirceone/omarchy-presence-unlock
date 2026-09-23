@@ -40,7 +40,7 @@ impl Monitor {
         let executable = std::env::current_exe()
             .map_err(|error| format!("cannot locate this executable: {error}"))?;
         let mut child = Command::new("sudo")
-            .arg("--")
+            .args(["--non-interactive", "--"])
             .arg(executable)
             .arg("mgmt-monitor")
             .arg("--adapter-index")
