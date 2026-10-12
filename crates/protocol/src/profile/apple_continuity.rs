@@ -29,7 +29,10 @@ fn evaluate(advertisement: &Advertisement<'_>) -> Observation {
         // carried.
         Ok(info) if info.watch_locked || !info.auto_unlock_enabled => Observation::Revoke,
         Ok(_) => Observation::Qualify,
-        // An undecodable state claim is never evidence that a Watch is unlocked.
+        // Apple advertisements may omit Nearby Info entirely while carrying
+        // other Continuity TLVs. Absence is not a lock-state assertion.
+        Err(apple::ParseError::MissingNearbyInfo) => Observation::Ignore,
+        // A malformed Nearby Info claim is never evidence that a Watch is unlocked.
         Err(_) => Observation::Revoke,
     }
 }
@@ -73,8 +76,20 @@ mod tests {
     #[test]
     fn absent_data_is_ignored_and_malformed_data_revokes() {
         let bare = Advertisement::new([1; 6], -50);
+        let without_nearby_info = HashMap::from([(
+            apple::COMPANY_ID,
+            vec![
+                0x0b, 0x03, 0xbc, 0xd7, 0x3f, 0x0c, 0x0e, 0x00, 0x8a, 0x10, 0x60, 0x72, 0xea, 0xaf,
+                0x51, 0x62, 0x78, 0xc5, 0xb4, 0xef, 0xad,
+            ],
+        )]);
         let malformed = HashMap::from([(apple::COMPANY_ID, vec![0x10, 5, 0])]);
+
         assert_eq!(PROFILE.evaluate(&bare), Observation::Ignore);
+        assert_eq!(
+            PROFILE.evaluate(&bare.with_manufacturer_data(&without_nearby_info)),
+            Observation::Ignore
+        );
         assert_eq!(
             PROFILE.evaluate(&bare.with_manufacturer_data(&malformed)),
             Observation::Revoke
