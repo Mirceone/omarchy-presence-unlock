@@ -1,0 +1,8 @@
+# `users` 0.10 is reached only through `pam`'s `client` feature, which the PAM
+# module enables solely as a dev-dependency for its unit test. The shipped
+# module does not link it (`cargo tree -e normal -i users` prints nothing).
+# The test calls only `get_user_by_name`; the advisory affects group listing
+# (`get_user_groups`/`group_access_list`). Revisit if `users` enters a
+# non-dev dependency path.
+[advisories]
+ignore = ["RUSTSEC-2025-0040"]
