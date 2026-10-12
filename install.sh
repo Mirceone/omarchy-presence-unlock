@@ -51,7 +51,10 @@ for command in cargo git makepkg pacman sudo realpath mktemp; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
-[[ $(uname -m) == x86_64 ]] || die "this project currently supports x86-64 only"
+case $(uname -m) in
+  x86_64 | aarch64) ;;
+  *) die "this project currently supports x86-64 and ARM64 only" ;;
+esac
 
 cd "$PROJECT_DIR"
 
