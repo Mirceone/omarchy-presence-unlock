@@ -1,5 +1,5 @@
 pkgname=omarchy-presence-unlock
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='BLE device presence unlock for Omarchy'
 arch=('x86_64' 'aarch64')
