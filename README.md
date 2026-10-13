@@ -1,6 +1,6 @@
 # Omarchy Presence Unlock
 
-Unlock an Omarchy desktop by deliberately holding Alt while a trusted Bluetooth
+Unlock an Omarchy desktop by deliberately holding Alt while a trusted Apple
 device is nearby. It removes routine lock-screen friction without making
 proximity alone an unlock signal.
 
@@ -63,9 +63,10 @@ Passwords and fingerprints remain the reliable fallback, but using them dozens
 of times a day adds friction. A trusted device can make a lock screen feel more
 immediate while Alt still makes each unlock an intentional act.
 
-An Apple Watch is the best-supported device because it can indicate both
-proximity and whether it is unlocked. A phone, band, or fob only indicates
-proximity; it cannot establish who is carrying it.
+Apple Watch and iPhone are currently the only devices that work reliably. They
+broadcast Bluetooth advertisements continuously and indicate both proximity and
+whether they are unlocked. Other Bluetooth devices, including Android phones,
+are not currently supported.
 
 ## Security tradeoff
 
