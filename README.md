@@ -25,6 +25,11 @@ Files owned by another package, separate copies shadowing the command on PATH,
 and installations without a working uninstaller are not overwritten. Resolve
 the reported conflict or repair the old installation before trying again.
 
+Prebuilt packages for tagged versions are on the
+[Releases](https://github.com/Mirceone/omarchy-presence-unlock/releases) page.
+Install one with `sudo pacman -U omarchy-presence-unlock-<version>-x86_64.pkg.tar.zst`,
+then run `omarchy-presence-unlock setup` inside your Omarchy session.
+
 If it was installed over SSH or outside your graphical Omarchy session, run the
 following after logging in:
 

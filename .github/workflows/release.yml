@@ -1,0 +1,124 @@
+# Publishes a GitHub release with a prebuilt Arch package.
+#
+# Usual path: Actions › Release › Run workflow, entering the new version. The
+# pipeline sets it in Cargo.toml, Cargo.lock and the root PKGBUILD, commits and
+# tags on main, then builds and publishes. Pushing a `v<version>` tag by hand
+# also works, provided those files already carry that version.
+#
+# The package is built from GitHub's tag tarball with the root PKGBUILD, exactly
+# as an AUR user would build it, so its checksum is computed after the tag exists.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bump:
+    name: Set version, commit and tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set version, commit and tag
+        id: tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like 1.2.3, got '$VERSION'"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+          # The first `version =` in Cargo.toml is [workspace.package].
+          sed -i "0,/^version = \".*\"$/s//version = \"$VERSION\"/" Cargo.toml
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/;s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          cargo update --workspace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --all --message "release: v$VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  # A tag pushed with the workflow token does not trigger `push: tags`, so the
+  # dispatch path builds here instead of in a second run.
+  package:
+    name: Build and publish Arch package
+    needs: bump
+    if: always() && (needs.bump.result == 'success' || (needs.bump.result == 'skipped' && github.event_name == 'push'))
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+
+    steps:
+      - name: Install packaging tools
+        run: pacman --sync --refresh --sysupgrade --noconfirm --needed base-devel clang git github-cli pacman-contrib rust
+
+      - name: Check out the tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Check the tag matches the declared versions
+        run: |
+          tag=${TAG#v}
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          pkgver=$(sed -n 's/^pkgver=//p' PKGBUILD)
+          if [[ $tag != "$crate" || $tag != "$pkgver" ]]; then
+            echo "::error::tag $TAG, Cargo.toml $crate and PKGBUILD $pkgver must match"
+            exit 1
+          fi
+
+      # makepkg refuses to run as root. --nodeps because omarchy is not in the
+      # official repositories; the build dependencies are installed above.
+      - name: Build package
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder --command 'cd "$GITHUB_WORKSPACE" && updpkgsums && makepkg --nodeps --cleanbuild --noconfirm'
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" -- *.pkg.tar.zst SHA256SUMS

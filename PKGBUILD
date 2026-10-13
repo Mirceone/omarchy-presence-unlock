@@ -8,9 +8,10 @@ license=('MIT')
 install=packaging/omarchy-presence-unlock.install
 backup=('etc/pam.d/omarchy-lock-presence')
 depends=('bluez' 'pam' 'omarchy' 'hyprland' 'systemd')
-makedepends=('cargo')
+makedepends=('cargo' 'clang')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('879858aa19665a02ce62fdcc5094049f3c09e45eb2d1d1e81ee8f169cd9b1fe3')
+options=('!debug')
 
 prepare() {
   cd "$srcdir/$pkgname-$pkgver"
