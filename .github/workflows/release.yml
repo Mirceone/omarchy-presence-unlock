@@ -1,4 +1,4 @@
-# Publishes a GitHub release with a prebuilt Arch package.
+# Publishes a GitHub release with prebuilt x86_64 and aarch64 Arch packages.
 #
 # Usual path: Actions › Release › Run workflow, entering the new version. The
 # pipeline sets it in Cargo.toml, Cargo.lock and the root PKGBUILD, commits and
@@ -77,19 +77,23 @@ jobs:
   # A tag pushed with the workflow token does not trigger `push: tags`, so the
   # dispatch path builds here instead of in a second run.
   package:
-    name: Build and publish Arch package
+    name: Build Arch package (${{ matrix.arch }})
     needs: bump
     if: always() && (needs.bump.result == 'success' || (needs.bump.result == 'skipped' && github.event_name == 'push'))
-    runs-on: ubuntu-24.04
-    container: archlinux:latest
-    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     env:
       TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+      ARCH: ${{ matrix.arch }}
 
     steps:
-      - name: Install packaging tools
-        run: pacman --sync --refresh --sysupgrade --noconfirm --needed base-devel clang git github-cli pacman-contrib rust
-
       - name: Check out the tag
         uses: actions/checkout@v6
         with:
@@ -106,19 +110,70 @@ jobs:
             exit 1
           fi
 
+      # Arch Linux publishes no official aarch64 image, so build one from the
+      # official Arch Linux ARM rootfs, verified against its build-system key.
+      - name: Prepare Arch Linux image
+        run: |
+          if [[ $ARCH == x86_64 ]]; then
+            echo "IMAGE=archlinux:latest" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          rootfs=ArchLinuxARM-aarch64-latest.tar.gz
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$rootfs" "http://os.archlinuxarm.org/os/$rootfs"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$rootfs.sig" "http://os.archlinuxarm.org/os/$rootfs.sig"
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys 68B3537F39A313B3E574D06777193F152BDBE6A6
+          gpg --batch --verify "$RUNNER_TEMP/$rootfs.sig" "$RUNNER_TEMP/$rootfs"
+          docker import "$RUNNER_TEMP/$rootfs" archlinuxarm:latest
+          echo "IMAGE=archlinuxarm:latest" >> "$GITHUB_ENV"
+
       # makepkg refuses to run as root. --nodeps because omarchy is not in the
-      # official repositories; the build dependencies are installed above.
+      # official repositories; the build dependencies are installed first.
       - name: Build package
         run: |
-          useradd --create-home builder
-          chown -R builder:builder "$GITHUB_WORKSPACE"
-          su builder --command 'cd "$GITHUB_WORKSPACE" && updpkgsums && makepkg --nodeps --cleanbuild --noconfirm'
+          docker run --rm --env ARCH --volume "$PWD:/work" "$IMAGE" bash -euo pipefail -c '
+            # Docker blocks Landlock, which the pacman 7 download sandbox needs,
+            # and CheckSpace cannot read mount points inside a container.
+            sed -i -e "s/^CheckSpace/#CheckSpace/" -e "/^\[options\]/a DisableSandbox" /etc/pacman.conf
+            if [[ $ARCH == aarch64 ]]; then
+              pacman-key --init
+              pacman-key --populate archlinuxarm
+            fi
+            pacman --sync --refresh --sysupgrade --noconfirm --needed base-devel clang git pacman-contrib rust
+            useradd --create-home builder
+            chown -R builder:builder /work
+            # Arch Linux ARM defaults PKGEXT to .pkg.tar.xz; match Arch Linux.
+            su builder --command "cd /work && updpkgsums && PKGEXT=.pkg.tar.zst makepkg --nodeps --cleanbuild --noconfirm"
+          '
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.arch }}
+          path: "*.pkg.tar.zst"
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [bump, package]
+    if: always() && needs.package.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ needs.bump.outputs.tag || github.ref_name }}
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          merge-multiple: true
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          cd "$GITHUB_WORKSPACE"
           sha256sum -- *.pkg.tar.zst > SHA256SUMS
           gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" -- *.pkg.tar.zst SHA256SUMS
