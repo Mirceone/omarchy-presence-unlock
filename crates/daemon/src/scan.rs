@@ -37,6 +37,11 @@ pub async fn scan(adapter_name: Option<&str>, service: Arc<Service>) -> Result<(
         .set_discovery_filter(DiscoveryFilter {
             transport: DiscoveryTransport::Le,
             duplicate_data: true,
+            // Any RSSI filter makes BlueZ publish every RSSI change; without
+            // one, `Device1.RSSI` only moves on changes of 8 dB or more, so the
+            // value read below lags the advertisement it arrives with. -127 is
+            // the lowest value BlueZ accepts, so nothing is filtered out.
+            rssi: Some(-127),
             ..Default::default()
         })
         .await?;
