@@ -225,6 +225,13 @@ const VIEW_HINT_PATCH: &str = r#"        horizontalAlignment: Text.AlignHCenter
     }
 "#;
 
+/// The stock lock powers the display off five seconds after the last input.
+/// After resume a desktop monitor spends most of that relinking, leaving the
+/// user a moment to start typing before the panel goes dark again.
+const SERVICE_BLANK_ANCHOR: &str = "    id: idleBlankTimer\n    interval: 5000\n";
+
+const SERVICE_BLANK_PATCH: &str = "    id: idleBlankTimer\n    interval: 30000\n";
+
 const SERVICE_PATCHES: &[(&str, &str)] = &[
     (SERVICE_STATE_ANCHOR, SERVICE_STATE_PATCH),
     (SERVICE_AUTHENTICATING_ANCHOR, SERVICE_AUTHENTICATING_PATCH),
@@ -232,6 +239,7 @@ const SERVICE_PATCHES: &[(&str, &str)] = &[
     (SERVICE_SUBMIT_ANCHOR, SERVICE_SUBMIT_PATCH),
     (SERVICE_LOCK_VIEW_ANCHOR, SERVICE_LOCK_VIEW_PATCH),
     (SERVICE_PREVIEW_ANCHOR, SERVICE_PREVIEW_PATCH),
+    (SERVICE_BLANK_ANCHOR, SERVICE_BLANK_PATCH),
 ];
 
 const VIEW_PATCHES: &[(&str, &str)] = &[
@@ -646,6 +654,11 @@ mod tests {
         "    LockView {\n",
         "      passwordText: \"\"\n",
         "    }\n",
+        "\n",
+        "  Timer {\n",
+        "    id: idleBlankTimer\n",
+        "    interval: 5000\n",
+        "  }\n",
         "}\n",
     );
 
@@ -695,6 +708,15 @@ mod tests {
         assert!(view.contains("property string presenceMessage"));
         assert!(view.contains("objectName: \"presenceStatus\""));
         assert!(view.contains("text: root.presenceMessage"));
+    }
+
+    /// The woken lock screen must stay lit long enough to type a password,
+    /// not drop to a dark panel while the monitor is still relinking.
+    #[test]
+    fn the_rendered_service_keeps_the_display_up_long_enough_to_type() {
+        let rendered = render_service(STOCK_SERVICE).unwrap();
+        assert!(rendered.contains("    id: idleBlankTimer\n    interval: 30000\n"));
+        assert!(!rendered.contains("interval: 5000"));
     }
 
     /// An Omarchy release that moves this code must stop setup, not produce a

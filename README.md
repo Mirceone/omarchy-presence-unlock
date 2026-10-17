@@ -41,6 +41,10 @@ omarchy-presence-unlock setup
 Use **Setup › Security › Presence Unlock** to enroll and manage devices.
 `omarchy-presence-unlock doctor` explains anything that needs attention.
 
+The generated lock also keeps the display on for 30 seconds after the last
+input, instead of Omarchy's 5, so a monitor waking from sleep doesn't go dark
+again before you can type.
+
 ## After an Omarchy update
 
 Nothing is required. Presence Unlock continues to use your existing setup.
