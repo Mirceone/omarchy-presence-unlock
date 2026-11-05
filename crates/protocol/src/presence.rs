@@ -108,8 +108,7 @@ impl Eligibility {
         self.last_rssi = Some(rssi);
         match observation {
             Observation::Revoke => {
-                self.invalidate_evidence();
-                self.last_revocation_ms = Some(now_ms);
+                self.revoke(now_ms);
                 return;
             }
             Observation::Ignore => return,
@@ -120,11 +119,9 @@ impl Eligibility {
         if rssi < policy.threshold_dbm {
             return;
         }
-        // BlueZ raises a property change for both RSSI and ManufacturerData on one
-        // advertisement, so each advertisement is delivered twice within a
-        // millisecond. Counting both would let a single advertisement satisfy
-        // `minimum_samples`. Apple Continuity advertises roughly every 250 ms, so
-        // this collapses the duplicate without discarding a genuine advertisement.
+        // Defense in depth against reports arriving in one burst. The transport
+        // must establish live packet evidence before calling observe: spacing
+        // alone cannot turn a cached property notification into a new packet.
         if self
             .last_qualifying_ms
             .is_some_and(|last| now_ms.saturating_sub(last) < Policy::MIN_SAMPLE_SPACING_MS)
@@ -133,6 +130,18 @@ impl Eligibility {
         }
         self.qualifying_samples.push(now_ms);
         self.last_qualifying_ms = Some(now_ms);
+    }
+
+    fn revoke(&mut self, now_ms: u64) {
+        self.invalidate_evidence();
+        self.last_revocation_ms = Some(now_ms);
+    }
+
+    fn sample_count(&self, now_ms: u64, policy: Policy) -> usize {
+        self.qualifying_samples
+            .iter()
+            .filter(|sample| now_ms.saturating_sub(**sample) <= policy.sample_window_ms)
+            .count()
     }
 
     /// Every staleness rule is enforced here, at the moment of decision.
@@ -156,11 +165,7 @@ impl Eligibility {
         if now_ms.saturating_sub(last) > policy.freshness_ms {
             return Decision::Deny(wire::DENY_STALE);
         }
-        let within_window = self
-            .qualifying_samples
-            .iter()
-            .filter(|sample| now_ms.saturating_sub(**sample) <= policy.sample_window_ms)
-            .count();
+        let within_window = self.sample_count(now_ms, policy);
         if within_window < usize::from(policy.minimum_samples) {
             return Decision::Deny(wire::DENY_INSUFFICIENT_SAMPLES);
         }
@@ -195,6 +200,20 @@ impl Device {
     #[must_use]
     pub fn check(&self, now_ms: u64) -> Decision {
         self.eligibility.check(now_ms, self.spec.policy)
+    }
+
+    /// Counted evidence still within the configured sample window, for diagnostics.
+    #[must_use]
+    pub fn qualifying_samples(&self, now_ms: u64) -> usize {
+        self.eligibility.sample_count(now_ms, self.spec.policy)
+    }
+
+    /// Age of the last counted qualifying report, for diagnostics only.
+    #[must_use]
+    pub fn last_qualifying_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.eligibility
+            .last_qualifying_ms
+            .map(|last| now_ms.saturating_sub(last))
     }
 
     #[must_use]
@@ -291,6 +310,18 @@ impl Fleet {
             device
                 .eligibility
                 .observe(now_ms, advertisement.rssi, observation, device.spec.policy);
+        }
+    }
+
+    /// A live payload without a packet RSSI can revoke, but never qualify.
+    /// The advertisement RSSI is ignored and diagnostic RSSI is preserved.
+    pub fn observe_revocations(&mut self, now_ms: u64, advertisement: &Advertisement<'_>) {
+        for device in &mut self.devices {
+            if device.spec.identity.matches(advertisement)
+                && device.spec.profile.evaluate(advertisement) == Observation::Revoke
+            {
+                device.eligibility.revoke(now_ms);
+            }
         }
     }
 

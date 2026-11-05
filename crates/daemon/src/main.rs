@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     eprintln!(
-        "multi-device authentication {:?}, skipping per-advertisement reads: {}",
+        "multi-device authentication {:?}, unused advertisement fields: {}",
         settings.multi_device_auth,
         scan::skipped_reads(fleet.needs()).join(", ")
     );

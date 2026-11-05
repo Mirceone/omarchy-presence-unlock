@@ -982,11 +982,14 @@ name = "presenced"
 version = "0.2.0"
 dependencies = [
  "bluer",
+ "dbus",
+ "dbus-tokio",
  "futures-util",
  "nix",
  "omarchy-presence-unlock-protocol",
  "thiserror 2.0.19",
  "tokio",
+ "uuid 1.24.0",
 ]
 
 [[package]]

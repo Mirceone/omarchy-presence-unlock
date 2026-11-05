@@ -9,6 +9,9 @@ workspace = true
 
 [dependencies]
 bluer.workspace = true
+dbus = "0.9"
+dbus-tokio = "0.7"
+uuid.workspace = true
 futures-util.workspace = true
 nix = { workspace = true, features = ["fs", "user"] }
 omarchy-presence-unlock-protocol = { path = "../protocol" }
